@@ -1,0 +1,19 @@
+name = "x-reply-guard-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-11-03"
+
+[vars]
+X_USER_ID = "REPLACE_WITH_NUMERIC_USER_ID"
+X_USERNAME = "REPLACE_WITH_USERNAME"
+PUBLISH_MODE = "approval"
+MAX_POSTS_PER_HOUR = "5"
+MAX_POSTS_PER_DAY = "20"
+DRAFT_TTL_MINUTES = "30"
+
+[[durable_objects.bindings]]
+name = "GUARD_STORE"
+class_name = "GuardStore"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GuardStore"]
