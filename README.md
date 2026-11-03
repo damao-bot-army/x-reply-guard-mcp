@@ -1,8 +1,23 @@
 # x-reply-guard-mcp
 
-A self-hosted X (Twitter) posting/reply MCP service on **Cloudflare Workers + one Durable Object**, calling the **official X API v2** directly with OAuth 1.0a user-context authentication. Designed for MCP clients such as Grok Bot; no third-party X proxy.
+[![CI](https://github.com/damao-bot-army/x-reply-guard-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/damao-bot-army/x-reply-guard-mcp/actions/workflows/ci.yml)
+![Node 22.12+](https://img.shields.io/badge/node-22.12%2B-brightgreen)
+![Cloudflare Workers](https://img.shields.io/badge/runs%20on-Cloudflare%20Workers-F38020)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**The security boundary is server-side, not in an AI prompt.** By default, drafts require human review and approval before publication. X content is always untrusted data.
+A self-hosted MCP service on Cloudflare Workers with a shared Durable Object, letting clients such as Grok Bot read X posts and mentions, draft posts and replies, and publish through the official X API v2. External content is treated as untrusted data, and server-side checks enforce human approval by default; `PUBLISH_MODE` selects `approval` or `auto`.
+
+<!-- screenshots -->
+
+## Status
+
+This project is for people who run their own Grok Bot and want human control over what it publishes on X using approval mode.
+
+- **Maturity:** early development, version 0.1.0. The author has not deployed it yet.
+- **Requirements:** a Cloudflare account with Workers and Durable Objects enabled; Cloudflare Access for `/admin`; an X developer application with OAuth 1.0a user tokens and Read and Write permissions; Node.js 22.12+ and npm.
+- **Releases:** none yet. Deploy from source using the [deployment instructions](#deployment) below.
+
+For bug reports and development checks, see [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately as described in [SECURITY.md](SECURITY.md).
 
 ## Tools (exactly six)
 
@@ -53,7 +68,7 @@ This version supports **one account and one shared client trust domain**, withou
 
 ### 2. Install and configure
 
-Use a Node.js version supported by current Wrangler/Vitest (22.12+ or current LTS recommended), npm, and a Cloudflare Workers account. Durable Objects use SQLite migration `v1`.
+Use Node.js 22.12+, npm, and a Cloudflare account with Workers and Durable Objects enabled. Durable Objects use SQLite migration `v1`.
 
 ```sh
 npm ci
