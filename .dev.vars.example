@@ -1,7 +1,11 @@
 # Only placeholders. Copy to .dev.vars and fill locally; never commit .dev.vars.
 MCP_BEARER_TOKEN="replace-with-random-at-least-32-bytes"
-# Human-held approval passphrase as well as HMAC key. NEVER give this to the AI.
+# Server-side HMAC signing key only. Humans never need to enter or know it.
 APPROVAL_SECRET="replace-with-a-different-random-at-least-32-bytes"
+ACCESS_TEAM_DOMAIN="replace-with-team.cloudflareaccess.com"
+ACCESS_AUD="replace-with-application-aud"
+# Optional; omit to rely on the Access application's policy.
+ACCESS_ALLOWED_EMAILS="owner@example.com"
 X_API_KEY="replace-api-key"
 X_API_SECRET="replace-api-secret"
 X_ACCESS_TOKEN="replace-access-token"

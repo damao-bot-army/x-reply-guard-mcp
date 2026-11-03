@@ -1,5 +1,5 @@
 // Real local workerd/DO smoke test. Dummy credentials only; never calls an X read
-// tool, nor publishes an approved draft. No Cloudflare account is required.
+// tool, approves a draft, or publishes a draft. No Cloudflare account is required.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -54,23 +54,20 @@ try {
   assert.ok(draft.structuredContent.draft_id);
   const blocked = await rpc('tools/call', { name: 'publish', arguments: { draft_id: draft.structuredContent.draft_id } });
   assert.ok(blocked.isError);
-  assert.match(blocked.content[0].text, /需要人工批准/);
+  assert.match(blocked.content[0].text, /Human approval required/);
   const url = draft.structuredContent.approval_url;
+  assert.equal(new URL(url).pathname, `/admin/approve/${draft.structuredContent.draft_id}`);
   const page = await fetch(url);
-  assert.equal(page.status, 200);
-  const csrf = /name="csrf" value="([^"]+)"/.exec(await page.text())[1];
-  const approval = await fetch(url.split('?')[0], {
-    method: 'POST',
-    headers: { Origin: base, Cookie: page.headers.get('set-cookie').split(';')[0], 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ decision: 'approve', csrf, sig: new URL(url).searchParams.get('sig'), approval_secret: vars.APPROVAL_SECRET }),
-  });
-  assert.equal(approval.status, 200);
-  // Deliberately do NOT publish the approved draft: this smoke test must never call X.
+  assert.equal(page.status, 403);
+  assert.equal(await page.text(), 'Forbidden');
+  assert.equal((await fetch(url.split('?')[0], { method: 'POST' })).status, 403);
+  assert.equal((await fetch(url.replace('/admin/approve/', '/approve/'))).status, 404);
+  // No Access credentials or bypass: local smoke must never authorize approval or call X.
   const status = await rpc('tools/call', { name: 'get_status', arguments: {} });
   assert.equal(status.structuredContent.posts_today, 0);
-  assert.equal(status.structuredContent.pending_approval, 0);
-  assert.ok(status.structuredContent.recent_audit.some(a => a.action === 'approve' && a.result === 'success'));
-  console.log('real DO: draft persisted; unapproved publish blocked; human approval persisted; X calls=0');
+  assert.equal(status.structuredContent.pending_approval, 1);
+  assert.ok(!status.structuredContent.recent_audit.some(a => a.action === 'approve' && a.result === 'success'));
+  console.log('real DO: draft persisted; unapproved publish blocked; admin GET/POST without JWT=403; old route=404; X calls=0');
 } catch (error) {
   console.error(log);
   throw error;

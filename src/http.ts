@@ -11,7 +11,7 @@ export async function readLimited(body: ReadableStream<Uint8Array> | null, limit
       const { done, value } = await reader.read();
       if (done) return text + decoder.decode();
       bytes += value.byteLength;
-      if (bytes > limit) { await reader.cancel(); throw new BodyLimitError('请求或响应过大'); }
+      if (bytes > limit) { await reader.cancel(); throw new BodyLimitError('Request or response too large'); }
       text += decoder.decode(value, { stream: true });
     }
   } finally { reader.releaseLock(); }

@@ -8,7 +8,7 @@ type User = { id: string; username: string; name: string; description?: string }
 interface XResponse { data?: Tweet | Tweet[]; includes?: { users?: User[]; tweets?: Tweet[] }; meta?: { newest_id?: string; oldest_id?: string; next_token?: string; result_count?: number } }
 const fields = 'tweet.fields=author_id,conversation_id,in_reply_to_user_id,referenced_tweets,entities&expansions=author_id,in_reply_to_user_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username,description';
 export function id(value: unknown): string {
-  if (typeof value !== 'string' || !/^\d{1,25}$/.test(value)) throw new Error('帖子/用户 ID 必须是数字字符串');
+  if (typeof value !== 'string' || !/^\d{1,25}$/.test(value)) throw new Error('Post/user ID must be a numeric string');
   return value;
 }
 export class XClient {
@@ -25,18 +25,18 @@ export class XClient {
         redirect: 'error',
         signal: AbortSignal.timeout(15000),
       }));
-    } catch { throw new Error('X API 网络错误或超时；发布结果可能未知，请人工核对，勿自动重试'); }
+    } catch { throw new Error('X API network error or timeout; publication outcome may be unknown. Check manually; do not retry automatically'); }
     if (!response.ok) {
       if (response.status === 429) {
         const raw = response.headers.get('x-rate-limit-reset');
         const retry = response.headers.get('retry-after');
         const wait = raw && /^\d{1,12}$/.test(raw) ? Math.max(1, Number(raw) - Math.floor(Date.now() / 1000)) : retry && /^\d{1,8}$/.test(retry) ? Number(retry) : 60;
-        throw new Error(`X API 限流 (429)，retry_after_seconds=${wait}`);
+        throw new Error(`X API rate limited (429)，retry_after_seconds=${wait}`);
       }
-      const labels: Record<number, string> = { 401: '认证失败', 403: '权限不足', 404: '帖子不存在或不可见' };
-      throw new Error(`X API ${labels[response.status] ?? '请求失败'} (${response.status})`);
+      const labels: Record<number, string> = { 401: 'authentication failed', 403: 'insufficient permissions', 404: 'post not found or not visible' };
+      throw new Error(`X API ${labels[response.status] ?? 'request failed'} (${response.status})`);
     }
-    try { return JSON.parse(await readLimited(response.body, 2 * 1024 * 1024)) as XResponse; } catch { throw new Error('X API 返回格式错误或响应过大'); }
+    try { return JSON.parse(await readLimited(response.body, 2 * 1024 * 1024)) as XResponse; } catch { throw new Error('X API returned invalid JSON or an oversized response'); }
   }
   async mentions(since?: string, max = 10): Promise<unknown> {
     const data = await this.request(`users/${id(this.env.X_USER_ID)}/mentions?${fields}&max_results=${max}${since ? `&since_id=${id(since)}` : ''}`);
@@ -44,7 +44,7 @@ export class XClient {
   }
   async rawPost(postId: string): Promise<XResponse & { data: Tweet }> {
     const result = await this.request(`tweets/${id(postId)}?${fields}`);
-    if (!result.data || Array.isArray(result.data) || result.data.id !== postId || typeof result.data.text !== 'string') throw new Error('X API 未返回目标帖子');
+    if (!result.data || Array.isArray(result.data) || result.data.id !== postId || typeof result.data.text !== 'string') throw new Error('X API did not return the target post');
     return result as XResponse & { data: Tweet };
   }
   async post(postId: string): Promise<unknown> { return this.project(await this.rawPost(postId)); }
@@ -57,13 +57,13 @@ export class XClient {
       const root = tweet.conversation_id === tweet.id ? result : await this.rawPost(tweet.conversation_id);
       ownedConversation = root.data.author_id === this.env.X_USER_ID;
     }
-    if (!mentioned && !ownedConversation) throw new Error('回复目标不在白名单：须 @本账号，或属于本账号发起的会话');
+    if (!mentioned && !ownedConversation) throw new Error('Reply target is not allowlisted: it must mention this account or belong to a conversation started by this account');
     return this.project(result);
   }
   async publish(text: string, target?: string): Promise<{ post_id: string }> {
     const result = await this.request('tweets', { text, ...(target ? { reply: { in_reply_to_tweet_id: id(target) } } : {}) });
     const tweet = result.data;
-    if (!tweet || Array.isArray(tweet)) throw new Error('X API 发布结果未知，请人工核对');
+    if (!tweet || Array.isArray(tweet)) throw new Error('X API publication outcome unknown; check manually');
     return { post_id: id(tweet.id) };
   }
   private project(result: XResponse): unknown {

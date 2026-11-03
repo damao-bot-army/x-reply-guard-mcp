@@ -6,7 +6,7 @@ import type { StoreData } from '../src/types';
 it('atomically chunks large snapshots, restores them, and removes stale chunks', async () => {
   const storage = new MemoryStorage();
   const data: StoreData = { drafts: {}, recent: [], hour: '', day: '', hourly: 0, daily: 0, audit: [] };
-  data.drafts.a = { id: 'a', text: '字😀'.repeat(100000), hash: 'hash', expires: 0, state: 'pending', risk_flags: [] };
+  data.drafts.a = { id: 'a', text: '\u5b57😀'.repeat(100000), hash: 'hash', expires: 0, state: 'pending', risk_flags: [] };
   await saveState(storage, data);
   expect(storage.values.size).toBeGreaterThan(2);
   for (const value of storage.values.values()) expect(new TextEncoder().encode(JSON.stringify(value)).length).toBeLessThan(128 * 1024);

@@ -3,6 +3,10 @@ main = "src/index.ts"
 compatibility_date = "2026-11-03"
 
 [vars]
+ACCESS_TEAM_DOMAIN = "REPLACE_WITH_TEAM.cloudflareaccess.com"
+ACCESS_AUD = "REPLACE_WITH_APPLICATION_AUD"
+# Optional defense in depth; remove to rely on the Access application's email policy.
+ACCESS_ALLOWED_EMAILS = "owner@example.com"
 X_USER_ID = "REPLACE_WITH_NUMERIC_USER_ID"
 X_USERNAME = "REPLACE_WITH_USERNAME"
 PUBLISH_MODE = "approval"
