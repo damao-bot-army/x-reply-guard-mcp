@@ -1,0 +1,8 @@
+# Only placeholders. Copy to .dev.vars and fill locally; never commit .dev.vars.
+MCP_BEARER_TOKEN="replace-with-random-at-least-32-bytes"
+# Human-held approval passphrase as well as HMAC key. NEVER give this to the AI.
+APPROVAL_SECRET="replace-with-a-different-random-at-least-32-bytes"
+X_API_KEY="replace-api-key"
+X_API_SECRET="replace-api-secret"
+X_ACCESS_TOKEN="replace-access-token"
+X_ACCESS_TOKEN_SECRET="replace-access-token-secret"
