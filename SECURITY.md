@@ -1,6 +1,6 @@
 # Security policy
 
-This service holds X write credentials, processes untrusted external content, and provides a human approval interface. Security issues can affect what is published from the connected X account and who can authorize it.
+This service holds X write credentials, passes untrusted content from X to an AI client, and serves a browser approval page under `/admin`. A vulnerability can let someone publish from the connected X account or approve posts without authorization.
 
 ## Report a vulnerability privately
 
@@ -18,13 +18,16 @@ You will get an answer within a week. Fixes land on `main`; there are no maintai
 
 ## In scope
 
-- Bypassing required human approval.
-- Prompt injection that causes a write without required approval.
-- Authentication bypass on `/mcp` or `/admin`.
-- Exposure of X credentials, the MCP Bearer token, or the approval signing secret.
-- Bypassing server-side publishing checks or altering a draft after approval.
+- Publishing in `approval` mode without a human approval, including through prompt injection in X content.
+- Authentication bypass on `/mcp` (the `MCP_BEARER_TOKEN` Bearer check) or `/admin` (Cloudflare Access JWT verification).
+- Forging approval links signed with `APPROVAL_SECRET`, or cross-site request forgery against the approval form.
+- Publishing a draft more than once, changing its text or reply target after approval, or exceeding the configured hourly and daily limits.
+- Bypassing the reply allowlist or the content checks applied at draft and publish time.
+- Exposure of `MCP_BEARER_TOKEN`, `APPROVAL_SECRET`, or the X credentials (`X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`) through tool results, approval pages, errors, or logs.
 
 ## Out of scope
 
-- Issues in X, Cloudflare, or Grok Bot itself rather than this repository.
+- Issues in X, Cloudflare, Grok Bot, or other MCP clients rather than this repository.
+- Posts published in `auto` mode that pass the server-side checks; that mode does not require human approval by design.
+- Attacks that require access to the Cloudflare account, Worker secrets, or the approver's Access session.
 - Deployment errors caused by ignoring the README's setup instructions.

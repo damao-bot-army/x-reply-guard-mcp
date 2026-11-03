@@ -18,9 +18,10 @@ npm ci
 
 See the README's [local development instructions](README.md#local-development-and-verification) for local Worker configuration and execution.
 
-Before submitting a pull request, run all required checks:
+Before submitting a pull request, run the same checks as CI:
 
 ```sh
+npm ci
 npm run typecheck
 npm test
 npx wrangler deploy --dry-run

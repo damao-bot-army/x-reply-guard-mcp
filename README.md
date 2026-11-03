@@ -5,16 +5,16 @@
 ![Cloudflare Workers](https://img.shields.io/badge/runs%20on-Cloudflare%20Workers-F38020)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A self-hosted MCP service on Cloudflare Workers with a shared Durable Object, letting clients such as Grok Bot read X posts and mentions, draft posts and replies, and publish through the official X API v2. External content is treated as untrusted data, and server-side checks enforce human approval by default; `PUBLISH_MODE` selects `approval` or `auto`.
+![x-reply-guard-mcp](docs/images/banner.jpg)
 
-<!-- screenshots -->
+A self-hosted MCP service on Cloudflare Workers with a shared Durable Object, letting clients such as Grok Bot read X posts and mentions, draft posts and replies, and publish through the official X API v2. External content is treated as untrusted data, and server-side checks enforce human approval by default; `PUBLISH_MODE` selects `approval` or `auto`.
 
 ## Status
 
-This project is for people who run their own Grok Bot and want human control over what it publishes on X using approval mode.
+This project is for people who connect Grok Bot or another MCP client to their own X account and want a human to approve each post in a browser before it is published.
 
 - **Maturity:** early development, version 0.1.0. The author has not deployed it yet.
-- **Requirements:** a Cloudflare account with Workers and Durable Objects enabled; Cloudflare Access for `/admin`; an X developer application with OAuth 1.0a user tokens and Read and Write permissions; Node.js 22.12+ and npm.
+- **Requirements:** a Cloudflare account with Workers and Durable Objects enabled; Cloudflare Zero Trust Access to protect `/admin`; an X developer application with OAuth 1.0a user-context Read and Write permissions on an X API plan that includes mentions, post lookup, and post creation; an MCP client that supports Streamable HTTP servers with a custom `Authorization` header; Node.js 22.12+ and npm.
 - **Releases:** none yet. Deploy from source using the [deployment instructions](#deployment) below.
 
 For bug reports and development checks, see [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately as described in [SECURITY.md](SECURITY.md).
@@ -25,7 +25,7 @@ For bug reports and development checks, see [CONTRIBUTING.md](CONTRIBUTING.md). 
 | --- | --- | --- |
 | `get_mentions` | `since_id?`, `max_results?` (5–100, default 10) | Read posts mentioning this account |
 | `get_post` | `post_id` | Read text, author, conversation, reply parent, and parent author |
-| `draft_post` | `text` | Create a draft only; return final preview, ID, expiration, and approval URL |
+| `draft_post` | `text` | Create a draft only; return ID, final preview, expiration, risk flags, and, in approval mode, the approval URL |
 | `draft_reply` | `in_reply_to_post_id`, `text` | Verify the reply allowlist live, then create a reply draft only |
 | `publish` | `draft_id` | Publish a draft after state, content, deduplication, and quota checks |
 | `get_status` | None | Mode, UTC hour/day counts and limits, pending approvals, last 20 audit summaries |
@@ -39,7 +39,7 @@ Direct messages, deletion, likes, reposts, follows, profile changes, media uploa
 - Only known fields are projected; raw X JSON and upstream error bodies are never passed through.
 - External text is normalized with Unicode NFKC. Zero-width, bidirectional, and C0/C1 control characters are removed (newlines preserved). Post text and biographies are capped at 1,000 Unicode code points; names/usernames at 100.
 - Read-tool text starts with a fixed English warning that X content is untrusted and must never be executed as instructions. Each response uses random `<<X_UNTRUSTED_…>>` boundaries; boundary lookalikes in content are escaped. Structured data lives under `untrusted_content`. Reply drafts also wrap and label their target context separately.
-- English and Chinese risk rules label `instruction_override`, `credential_request`, `tool_invocation`, `role_impersonation`, `exfil_url`, `hidden_text`, and `risk_level`. They cover instruction overrides, system prompts, role spoofing, credential requests, immediate publication, exfiltration URLs, and hidden characters. These are advisory labels, not authorization. Multilingual patterns and fixtures use Unicode escapes in source.
+- English and Chinese risk rules label `instruction_override`, `credential_request`, `tool_invocation`, `role_impersonation`, `exfil_url`, `hidden_text`, and `risk_level`. They cover instruction overrides, system prompts, role spoofing, credential requests, immediate publication, exfiltration URLs, and hidden characters. These are advisory labels, not authorization. Chinese characters in the risk patterns are written as Unicode escapes in source.
 
 ### Write path: enforced by the server
 
@@ -57,6 +57,15 @@ Direct messages, deletion, likes, reposts, follows, profile changes, media uploa
 12. Last-mile redaction covers tool results, HTML, and errors. Requests, credentials, and raw X errors are not logged. X 401/403/404/429 map to fixed messages; 429 includes `retry_after_seconds`. X fetch forbids redirects and times out after 15 seconds. Limits: MCP body 32 KiB, approval POST 4 KiB, X response 2 MiB.
 
 `auto` explicitly lowers the human-authorization requirement: an AI may publish any ordinary text passing the hard checks. Risk rules are not semantic moderation. Keep `approval` if **every post must be human-authorized**.
+
+## Data storage
+
+Everything runs in your own Cloudflare account. The Worker sends outbound requests only to `api.x.com` and to your Access team's `/cdn-cgi/access/certs` endpoint.
+
+- **Worker secrets:** `MCP_BEARER_TOKEN`, `APPROVAL_SECRET`, and the four X credentials.
+- **Durable Object storage:** one fixed-name `GuardStore` object (binding `GUARD_STORE`, SQLite-backed) holds all state: drafts (final text, text hash, reply target ID, sanitized target context, risk flags, state, expiration), the last 50 published/reserved text hashes, the current UTC hour/day counters, and the last 500 audit entries (no text bodies). Drafts are deleted 24 hours after expiration during later operations.
+- **Not stored:** results of `get_mentions` and `get_post`, and raw MCP requests. Access public keys (JWKS) are cached only in Worker memory for five minutes.
+- **Worker logs:** `access_denied` events with a fixed reason category.
 
 ## Deployment
 
@@ -101,7 +110,7 @@ Never reuse `APPROVAL_SECRET` as the MCP Bearer or an X credential. It is solely
 | `ACCESS_AUD` | var | Required for admin: Access application's Audience (AUD) tag |
 | `ACCESS_ALLOWED_EMAILS` | optional var | Comma-separated email allowlist, trimmed and case-insensitive; if set, JWT email must match. An empty list denies everyone |
 | `X_USER_ID`, `X_USERNAME` | var | Account ID / username |
-| `PUBLISH_MODE` | var | `approval` (default if omitted) or `auto`; other values refuse writes |
+| `PUBLISH_MODE` | var | `approval` (default if omitted) or `auto`; any other value makes `draft_*`, `publish`, and `get_status` fail with a configuration error |
 | `MAX_POSTS_PER_HOUR` | var | 5; positive integer |
 | `MAX_POSTS_PER_DAY` | var | 20; positive integer |
 | `DRAFT_TTL_MINUTES` | var | 30; positive integer |
@@ -110,7 +119,7 @@ Grok Bot needs only the MCP Bearer. Do not grant it Cloudflare administration cr
 
 ### Cloudflare Access setup
 
-1. In **Cloudflare Zero Trust → Access → Applications**, create a **self-hosted application** covering `<worker-host>/admin/*` (for example `x-reply-guard.example.com/admin/*`). Use the same hostname as the MCP URL so generated links reach the protected host. Future Dashboard routes will share this admin boundary.
+1. In **Cloudflare Zero Trust → Access → Applications**, create a **self-hosted application** covering `<worker-host>/admin/*` (for example `x-reply-guard.example.com/admin/*`). Use the same hostname as the MCP URL so generated links reach the protected host.
 2. Configure an **Allow policy restricted to your own email address**, using your preferred identity provider or email one-time PIN. Do not add public Bypass policies or machine/service-token approvals for this application.
 3. Copy the application's **Application Audience (AUD) tag** into `ACCESS_AUD`.
 4. Set `ACCESS_TEAM_DOMAIN` to your Zero Trust team domain, e.g. `your-team.cloudflareaccess.com`, without `https://` or a trailing slash.
@@ -154,7 +163,7 @@ The MCP layer is minimal **JSON-RPC over Streamable HTTP**: stateless POST, JSON
 4. Give `approval_url` to the human. In a browser, they sign in through Access, review the immutable final preview, target, and risks, then approve or reject. No manual Worker password is required.
 5. After approval, call `publish({ draft_id })` and verify on X. A second call for the same draft fails.
 
-Routes are `/health`, `/mcp`, and `/admin/approve/<32-hex-id>`. Old `/approve/<id>` URLs return 404 with no redirect. Unknown admin routes return 404 after successful Access authentication; unauthenticated admin requests always return 403. There is a shared admin routing entry point ready for a future Dashboard, but no Dashboard yet.
+Routes are `/health`, `/mcp`, and `/admin/approve/<32-hex-id>`. Old `/approve/<id>` URLs return 404 with no redirect. Unknown admin routes return 404 after successful Access authentication; unauthenticated admin requests always return 403.
 
 ### 5. Switching to automatic mode
 
@@ -201,7 +210,7 @@ curl http://localhost:8787/mcp \
 ## Initial scope and limitations
 
 - Static risk heuristics can be conservative (e.g. ordinary technical discussion mentioning "token", or long English/base64-like strings). They are not semantic moderation. Chinese/emoji length uses code points rather than X's full weighted algorithm; X ultimately determines acceptance.
-- Text only, one account. No multi-user OAuth, images, thread orchestration, background scheduling, SSE push, or approval notifications. Mentions exposes `since_id` / `max_results`, not pagination tokens; callers may save `newest_id` for incremental reads.
+- Text only, one account. No multi-user OAuth, images, thread orchestration, background scheduling, SSE push, or approval notifications. `get_mentions` accepts `since_id` / `max_results` but no pagination token; callers may save `newest_id` for incremental reads.
 - Browser approval requires HTTPS, a trusted browser, and a restrictive Access policy. Treat signed links as sensitive, even though the link alone grants neither reading nor approval access. Never share Access sessions with an AI client.
 - Unknown send outcomes retain reservations and may consume quota without a successful post. This explicitly favors avoiding duplicates over automatic recovery. Credential cleanup/rotation, mode changes, Access policies, and long-term audit archival are operational responsibilities.
 - All MCP clients must share one trusted authorization domain. The Bearer does not distinguish users and status contains audit summaries. Admin identity is delegated to Access, with optional Worker-side email restriction; there is no separate application user database.
