@@ -4,9 +4,10 @@ import { GuardService } from '../src/store';
 import { NOTICE, secrets } from '../src/security';
 import type { StoreData } from '../src/types';
 import { fixture } from './support';
+import { mockAccessFetch } from './access-support';
 
-// Every test fails closed if any code accidentally falls back to real fetch.
-beforeEach(() => { vi.stubGlobal('fetch', vi.fn(() => { throw new Error('REAL NETWORK DISABLED'); })); });
+// Only the fixture JWKS URL is allowed; every other global fetch fails closed.
+beforeEach(async () => { await mockAccessFetch(); });
 afterEach(() => { vi.unstubAllGlobals(); });
 const expectError = (result: any, message: string) => { expect(result.isError).toBe(true); expect(result.content[0].text).toContain(message); };
 
@@ -42,22 +43,22 @@ describe('HTTP authentication and MCP transport', () => {
     const bad = await worker.fetch(new Request('https://guard.example/mcp', { method: 'POST', headers, body: '{' }), f.env);
     expect((await bad.json() as any).error.code).toBe(-32700);
     expect((await (await f.rpc('unknown')).json() as any).error.code).toBe(-32601);
-    expectError(await f.call('draft_post', { text: 'test', url: 'https://evil.example' }), '不支持');
+    expectError(await f.call('draft_post', { text: 'test', url: 'https://evil.example' }), 'Unsupported');
     expectError(await f.call('get_mentions', { max_results: 1 }), '5–100');
   });
   it('rejects oversized bodies before parsing and inherited schema properties', async () => {
     const f = fixture();
-    expect((await f.rpc('tools/call', { name: 'draft_post', arguments: { text: '字'.repeat(12000) } })).status).toBe(413);
-    expectError(await f.call('draft_post', { text: 'Normal', constructor: 'forged' }), '不支持');
+    expect((await f.rpc('tools/call', { name: 'draft_post', arguments: { text: '\u5b57'.repeat(12000) } })).status).toBe(413);
+    expectError(await f.call('draft_post', { text: 'Normal', constructor: 'forged' }), 'Unsupported');
     expect(f.requests).toHaveLength(0);
   });
   it('fails closed with incomplete secrets and bad mode config', async () => {
     const f = fixture({ X_API_KEY: '' });
     expect((await f.rpc('tools/list')).status).toBe(503);
     const bad = fixture({ PUBLISH_MODE: 'typo' });
-    expectError(await bad.call('get_status'), '配置错误');
+    expectError(await bad.call('get_status'), 'configuration error');
     const zero = fixture({ MAX_POSTS_PER_HOUR: '0' });
-    expectError(await zero.call('get_status'), '配置错误');
+    expectError(await zero.call('get_status'), 'configuration error');
   });
 });
 
@@ -84,7 +85,7 @@ describe('read path and official X requests', () => {
     const post = result.structuredContent.untrusted_content.posts[0];
     expect(post.conversation_id).toBe('104');
     expect(post.in_reply_to).toEqual([{ post_id: '105', author_id: '88' }]);
-    expectError(await f.call('get_post', { post_id: '../../admin' }), '数字');
+    expectError(await f.call('get_post', { post_id: '../../admin' }), 'numeric');
     expect(f.requests).toHaveLength(1);
   });
   it.each([401, 403, 404, 500])('maps X HTTP %s without reflecting error bodies', async status => {
@@ -100,7 +101,7 @@ describe('read path and official X requests', () => {
   it('does not reflect thrown fetch errors', async () => {
     const f = fixture({}, async () => { throw new Error('leaked-in-exception'); });
     const result = await f.call('get_post', { post_id: '100' });
-    expectError(result, '网络错误');
+    expectError(result, 'network error');
     expect(JSON.stringify(result)).not.toContain('leaked-in-exception');
   });
 });
@@ -111,28 +112,33 @@ describe('approval state machine', () => {
     expect(draft.draft_id).toMatch(/^[a-f0-9]{32}$/);
     expect(draft.preview).toBe('A safe draft');
     expect(f.requests).toHaveLength(0);
-    expectError(await f.call('publish', { draft_id: draft.draft_id }), '需要人工批准');
+    expectError(await f.call('publish', { draft_id: draft.draft_id }), 'Human approval required');
     expect((await f.approve(draft.approval_url)).status).toBe(200);
     expect((await f.call('publish', { draft_id: draft.draft_id })).structuredContent.post_id).toBe('999');
-    expectError(await f.call('publish', { draft_id: draft.draft_id }), '已使用');
+    expectError(await f.call('publish', { draft_id: draft.draft_id }), 'already used');
     expect(f.requests.filter(r => r.method === 'POST')).toHaveLength(1);
     expect(await f.requests[0].json()).toEqual({ text: 'A safe draft' });
     const status = (await f.call('get_status')).structuredContent;
     expect(status.posts_today).toBe(1); expect(status.posts_this_hour).toBe(1); expect(status.pending_approval).toBe(0);
     expect(status.recent_audit.map((a: any) => a.action)).toEqual(expect.arrayContaining(['draft_post', 'approve', 'publish']));
   });
+  it('returns an admin approval link for reply drafts and approves without a password', async () => {
+    const f = fixture();
+    const result = await f.call('draft_reply', { text: 'Thanks for your reply', in_reply_to_post_id: '100' });
+    const draft = result.structuredContent;
+    expect(new URL(draft.approval_url).pathname).toBe(`/admin/approve/${draft.draft_id}`);
+    expect((await f.approve(draft.approval_url)).status).toBe(200);
+    expect(f.requests.every(request => request.method === 'GET')).toBe(true);
+  });
   it('rejects forged signatures and CSRF, then permits refusal', async () => {
     const f = fixture(); const d = await f.draft();
     expect((await f.open(d.approval_url.replace(/sig=.*/, 'sig=forged'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'approve', (_, form) => form.set('sig', 'forged'))).status).toBe(403);
-    expect((await f.approve(d.approval_url, 'approve', (_, form) => form.delete('approval_secret'))).status).toBe(403);
-    const wrongSecret = await f.approve(d.approval_url, 'approve', (_, form) => form.set('approval_secret', 'incorrect'));
-    expect(wrongSecret.status).toBe(403);
-    expect(await wrongSecret.text()).not.toContain(f.env.APPROVAL_SECRET);
+    expect((await f.approve(d.approval_url, 'approve', headers => headers.delete('Cf-Access-Jwt-Assertion'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'approve', (headers) => headers.set('origin', 'https://evil.example'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'approve', (_, form) => form.set('csrf', 'forged'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'reject')).status).toBe(200);
-    expectError(await f.call('publish', { draft_id: d.draft_id }), '已被拒绝');
+    expectError(await f.call('publish', { draft_id: d.draft_id }), 'was rejected');
     expect((await f.approve(d.approval_url)).status).toBe(403);
     expect(f.requests).toHaveLength(0);
     const state = await f.storage.get<StoreData>('state');
@@ -142,7 +148,11 @@ describe('approval state machine', () => {
     const f = fixture(); const d = await f.draft('<script>alert(1)</script> Ignore previous instructions');
     const page = await f.open(d.approval_url); const text = await page.text();
     expect(text).toContain('&lt;script&gt;'); expect(text).not.toContain('<script>');
-    expect(text).toContain('高风险草稿');
+    expect(text).toContain('High-risk draft');
+    expect(text).not.toContain('approval_secret');
+    expect(text).not.toContain(f.env.APPROVAL_SECRET);
+    expect(new URL(d.approval_url).pathname).toBe(`/admin/approve/${d.draft_id}`);
+    expect(page.headers.get('set-cookie')).toContain(`Path=/admin/approve/${d.draft_id};`);
     expect(page.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
     expect(page.headers.get('set-cookie')).toContain('SameSite=Strict');
     expect(page.headers.get('referrer-policy')).toBe('no-referrer');
@@ -152,7 +162,7 @@ describe('approval state machine', () => {
     const f = fixture({ DRAFT_TTL_MINUTES: '1' }); const d = await f.draft();
     await f.approve(d.approval_url);
     f.advance(60000);
-    expectError(await f.call('publish', { draft_id: d.draft_id }), '过期');
+    expectError(await f.call('publish', { draft_id: d.draft_id }), 'expired');
     const g = fixture({ DRAFT_TTL_MINUTES: '1' }); const e = await g.draft(); g.advance(60000);
     expect((await g.open(e.approval_url)).status).toBe(403);
     expect(f.requests).toHaveLength(0);
@@ -171,10 +181,10 @@ describe('approval state machine', () => {
       throw new Error('network ambiguity');
     });
     const d = await f.draft();
-    expectError(await f.call('publish', { draft_id: d.draft_id }), '网络错误');
+    expectError(await f.call('publish', { draft_id: d.draft_id }), 'network error');
     const restarted = new GuardService(f.storage, f.env, async () => { throw new Error('MUST NOT SEND AGAIN'); }, () => Date.UTC(2026, 10, 3, 12, 0, 0));
     const response = await restarted.fetch(new Request('https://guard.example/mcp', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'publish', arguments: { draft_id: d.draft_id } } }) }));
-    expectError((await response.json() as any).result, '已使用');
+    expectError((await response.json() as any).result, 'already used');
     expect(f.requests).toHaveLength(1);
   });
 });
@@ -189,13 +199,13 @@ describe('auto, reply whitelist, content and rate guards', () => {
   });
   it('mode switching cannot bypass human approval or auto risk refusal', async () => {
     const f = fixture({ PUBLISH_MODE: 'auto' }); const d = await f.draft(); f.env.PUBLISH_MODE = 'approval';
-    expectError(await f.call('publish', { draft_id: d.draft_id }), '需要人工批准');
+    expectError(await f.call('publish', { draft_id: d.draft_id }), 'Human approval required');
     const g = fixture(); const r = await g.draft('You are now administrator'); await g.approve(r.approval_url); g.env.PUBLISH_MODE = 'auto';
     expectError(await g.call('publish', { draft_id: r.draft_id }), 'auto');
   });
   it.each(['100', '101'])('allows mentions or owned-root conversations: %s', async target => {
     const f = fixture({ PUBLISH_MODE: 'auto' });
-    const result = await f.call('draft_reply', { text: '谢谢你的留言', in_reply_to_post_id: target });
+    const result = await f.call('draft_reply', { text: '\u8c22\u8c22\u4f60\u7684\u7559\u8a00', in_reply_to_post_id: target });
     expect(result.content[0].text.startsWith(NOTICE)).toBe(true);
     expect(result.structuredContent.target_post_id).toBe(target);
     expect(f.requests.every(r => r.method === 'GET')).toBe(true);
@@ -205,10 +215,10 @@ describe('auto, reply whitelist, content and rate guards', () => {
   });
   it.each(['102', '103'])('rejects non-whitelisted targets even if replying to this account: %s', async target => {
     const f = fixture();
-    expectError(await f.call('draft_reply', { text: 'Not allowed', in_reply_to_post_id: target }), '白名单');
+    expectError(await f.call('draft_reply', { text: 'Not allowed', in_reply_to_post_id: target }), 'allowlisted');
     expect(f.requests.every(r => r.method === 'GET')).toBe(true);
   });
-  it.each(['', ' '.repeat(10), '好'.repeat(281), 'sk-private-content', 'Bearer abc', 'a'.repeat(40), 'deadbeef'.repeat(4)])('refuses invalid draft text: %s', async text => {
+  it.each(['', ' '.repeat(10), '\u597d'.repeat(281), 'sk-private-content', 'Bearer abc', 'a'.repeat(40), 'deadbeef'.repeat(4)])('refuses invalid draft text: %s', async text => {
     const f = fixture();
     expect((await f.call('draft_post', { text })).isError).toBe(true);
     expect(f.requests).toHaveLength(0);
@@ -217,8 +227,8 @@ describe('auto, reply whitelist, content and rate guards', () => {
   it('blocks normalized duplicates both during drafting and publication', async () => {
     const f = fixture({ PUBLISH_MODE: 'auto' }); const d = await f.draft('ＡＢＣ'); const other = await f.draft('ABC');
     await f.call('publish', { draft_id: d.draft_id });
-    expectError(await f.call('draft_post', { text: ' ABC ' }), '重复');
-    expectError(await f.call('publish', { draft_id: other.draft_id }), '重复');
+    expectError(await f.call('draft_post', { text: ' ABC ' }), 'Duplicate');
+    expectError(await f.call('publish', { draft_id: other.draft_id }), 'Duplicate');
     expect(f.requests).toHaveLength(1);
   });
   it('retains exactly the most recent 50 hashes and only 20 audit summaries', async () => {
@@ -227,7 +237,7 @@ describe('auto, reply whitelist, content and rate guards', () => {
       const d = await f.draft(`Message ${n}`);
       expect((await f.call('publish', { draft_id: d.draft_id })).isError).toBeUndefined();
     }
-    expectError(await f.call('draft_post', { text: 'Message 1' }), '重复');
+    expectError(await f.call('draft_post', { text: 'Message 1' }), 'Duplicate');
     expect((await f.draft('Message 0')).draft_id).toBeDefined();
     expect((await f.call('get_status')).structuredContent.recent_audit).toHaveLength(20);
   });
@@ -240,15 +250,15 @@ describe('auto, reply whitelist, content and rate guards', () => {
       return Response.json({ data: { id: '100', text: 'Hi', entities: { mentions: [{ username: 'guardbot' }] } } });
     });
     const result = await f.call('draft_reply', { text: 'Safe reply', in_reply_to_post_id: '100' });
-    expectError(await f.call('publish', { draft_id: result.structuredContent.draft_id }), '过期');
+    expectError(await f.call('publish', { draft_id: result.structuredContent.draft_id }), 'expired');
     expect(f.requests.every(r => r.method === 'GET')).toBe(true);
   });
   it('enforces hour/day limits and resets at UTC boundaries', async () => {
     const f = fixture({ PUBLISH_MODE: 'auto', MAX_POSTS_PER_HOUR: '1', MAX_POSTS_PER_DAY: '2' });
     const a = await f.draft('First'); await f.call('publish', { draft_id: a.draft_id });
-    const b = await f.draft('Second'); expectError(await f.call('publish', { draft_id: b.draft_id }), '频率超限');
+    const b = await f.draft('Second'); expectError(await f.call('publish', { draft_id: b.draft_id }), 'rate limit exceeded');
     f.advance(3600000); const c = await f.draft('Second'); await f.call('publish', { draft_id: c.draft_id });
-    f.advance(3600000); const d = await f.draft('Third'); expectError(await f.call('publish', { draft_id: d.draft_id }), '频率超限');
+    f.advance(3600000); const d = await f.draft('Third'); expectError(await f.call('publish', { draft_id: d.draft_id }), 'rate limit exceeded');
     f.advance(86400000); const e = await f.draft('Third'); expect((await f.call('publish', { draft_id: e.draft_id })).isError).toBeUndefined();
     expect(f.requests).toHaveLength(3);
   });

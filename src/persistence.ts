@@ -17,7 +17,7 @@ export async function loadState(storage: Storage): Promise<StoreData | undefined
   const chunks: string[] = [];
   for (let i = 0; i < value.chunks; i++) {
     const chunk = await storage.get<string>(`state:${i}`);
-    if (chunk === undefined) throw new Error('持久化状态不完整');
+    if (chunk === undefined) throw new Error('Persisted state is incomplete');
     chunks.push(chunk);
   }
   return JSON.parse(chunks.join('')) as StoreData;

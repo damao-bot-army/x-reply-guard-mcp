@@ -2,6 +2,9 @@ export interface Env {
   GUARD_STORE: DurableObjectNamespace;
   MCP_BEARER_TOKEN: string;
   APPROVAL_SECRET: string;
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
+  ACCESS_ALLOWED_EMAILS?: string;
   X_API_KEY: string;
   X_API_SECRET: string;
   X_ACCESS_TOKEN: string;
