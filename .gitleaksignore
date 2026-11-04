@@ -1,0 +1,2 @@
+# Public example credentials from the OAuth 1.0a spec (RFC 5849) used in test/security.test.ts
+112bcd49859f641022837ceaef360485501bcef4:test/security.test.ts:generic-api-key:8

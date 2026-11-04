@@ -19,6 +19,8 @@ This project is for people who connect Grok Bot or another MCP client to their o
 
 For bug reports and development checks, see [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately as described in [SECURITY.md](SECURITY.md).
 
+Secret scanning: [gitleaks](https://github.com/gitleaks/gitleaks) runs in CI on every pull request and push to `main`, and as a pre-commit hook (`npm install` sets `core.hooksPath` to `.githooks`; requires `gitleaks` in `PATH`).
+
 ## Tools (exactly six)
 
 | Tool | Arguments | Purpose |
