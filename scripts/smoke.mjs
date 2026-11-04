@@ -43,12 +43,22 @@ async function rpc(method, params = {}) {
   assert.equal(response.status, 200);
   return (await response.json()).result;
 }
+/** The page's inline style/script must carry the nonce from its CSP, also after the DO's redaction pass. */
+function assertNonce(response, html, suffix = '') {
+  const csp = response.headers.get('Content-Security-Policy');
+  const nonce = /^default-src 'none'; frame-ancestors 'none'; base-uri 'none'; style-src 'nonce-([A-Za-z0-9+/]{24})'; script-src 'nonce-\1'(.*)$/.exec(csp);
+  assert.ok(nonce, `Unexpected CSP: ${csp}`);
+  assert.equal(nonce[2], suffix);
+  assert.ok(!csp.includes('unsafe-inline'));
+  assert.ok(html.includes(`<style nonce="${nonce[1]}">`) && html.includes(`<script nonce="${nonce[1]}">`), 'Nonce mismatch between CSP and page');
+}
 async function approvalForm(url) {
   const page = await fetch(url);
   assert.equal(page.status, 200);
   // no-referrer would make real browsers send `Origin: null` on the form POST below.
   assert.equal(page.headers.get('referrer-policy'), 'same-origin');
   const html = await page.text();
+  assertNonce(page, html, "; form-action 'self'");
   assert.match(html, /type="password" name="password"/);
   const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
   assert.ok(csrf, 'Missing CSRF token');
@@ -96,8 +106,10 @@ try {
   const consent = async () => {
     const page = await fetch(authUrl);
     assert.equal(page.status, 200, await page.clone().text());
-    assert.equal(page.headers.get('Content-Security-Policy'), "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
-    const handle = (await page.text()).match(/name="handle" value="([^"]+)"/)?.[1];
+    assert.equal(page.headers.get('Referrer-Policy'), 'same-origin');
+    const html = await page.text();
+    assertNonce(page, html);
+    const handle = html.match(/name="handle" value="([^"]+)"/)?.[1];
     assert.ok(handle, 'Missing consent handle');
     return (fields) => fetch(`${base}/authorize`, {
       method: 'POST', redirect: 'manual', headers: { Origin: base, Cookie: cookies(page) },
@@ -141,17 +153,17 @@ try {
   for (const fields of [{ decision: 'approve' }, { decision: 'approve', password: 'wrong-password' }]) {
     const response = await decide(fields);
     assert.equal(response.status, 403);
-    assert.equal(await response.text(), 'Incorrect password');
+    assert.match(await response.text(), /<h1>Incorrect password<\/h1>/);
   }
   assert.match((await rpc('tools/call', { name: 'publish', arguments: { draft_id: first.draft_id } })).content[0].text, /Human approval required/);
   const rejected = await decide({ decision: 'reject' });
   assert.equal(rejected.status, 200);
-  assert.equal(await rejected.text(), 'Rejected.');
+  assert.match(await rejected.text(), /<h1>Rejected<\/h1>/);
   assert.match((await rpc('tools/call', { name: 'publish', arguments: { draft_id: first.draft_id } })).content[0].text, /was rejected/);
   const second = (await rpc('tools/call', { name: 'draft_post', arguments: { text: 'Second local smoke draft.' } })).structuredContent;
   const approvedDraft = await (await approvalForm(second.approval_url))({ decision: 'approve', password });
   assert.equal(approvedDraft.status, 200);
-  assert.match(await approvedDraft.text(), /^Approved/);
+  assert.match(await approvedDraft.text(), /<h1>Approved<\/h1>/);
   assert.equal((await fetch(first.approval_url.replace('/admin/approve/', '/approve/'))).status, 404);
   const status = (await rpc('tools/call', { name: 'get_status', arguments: {} })).structuredContent;
   assert.equal(status.posts_today, 0);

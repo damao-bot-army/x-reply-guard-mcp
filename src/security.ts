@@ -60,9 +60,13 @@ export function checkText(text: string, env: Env): { text: string; risk_flags: s
   if (!clean) throw new Error('Text must not be empty');
   const secretPattern = /sk-[a-z0-9_-]+|Bearer\s+|\b[a-f0-9]{32,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2}/iu;
   if (secrets(env).some(s => [s, normalize(s), sanitize(s, 10000), encodeURIComponent(s)].some(v => v && (text.includes(v) || normalized.includes(v) || clean.includes(v)))) || secretPattern.test(normalized) || secretPattern.test(clean)) throw new Error('Text contains a suspected secret; refused');
-  const length = Array.from(clean.replace(/https?:\/\/[^\s]+/giu, 'x'.repeat(23))).length;
+  const length = postLength(clean);
   if (length > 280) throw new Error('Text exceeds 280 characters (URLs count as 23)');
   return { text: clean, risk_flags: risks(text).risk_flags };
+}
+/** The length checked against the 280 limit: Unicode code points, with each HTTP(S) URL counted as 23. */
+export function postLength(text: string): number {
+  return Array.from(text.replace(/https?:\/\/[^\s]+/giu, 'x'.repeat(23))).length;
 }
 export function html(text: string): string {
   return text.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);

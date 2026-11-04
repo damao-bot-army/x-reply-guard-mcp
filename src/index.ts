@@ -5,8 +5,9 @@ import OAuthProvider, {
   insufficientScope,
 } from '@cloudflare/workers-oauth-provider';
 import type { Env } from './types';
-import { html, passwordMatches, secrets } from './security';
+import { passwordMatches, secrets } from './security';
 import { GuardService } from './store';
+import { authorizationFailedPage, consentPage, crossOriginPage, methodNotAllowedPage, wrongPasswordPage } from './pages';
 
 export class GuardStore {
   private service: GuardService;
@@ -25,6 +26,19 @@ async function forward(request: Request, env: Env): Promise<Response> {
   } catch { return new Response('Internal server error; please try again later', { status: 500 }); }
 }
 
+/**
+ * The consent page a form was posted from, so a mistyped password can be retried. Opening it again
+ * runs the same authorization request through parseAuthRequest with a fresh consent handle, exactly
+ * like reloading the page; without a same-origin Referer the user restarts from the client instead.
+ */
+function consentPageUrl(request: Request, url: URL): string | undefined {
+  try {
+    const referer = new URL(request.headers.get('Referer') ?? '');
+    if (referer.origin === url.origin && referer.pathname === '/authorize' && referer.search) return `/authorize${referer.search}`;
+  } catch { /* Missing or malformed Referer. */ }
+  return undefined;
+}
+
 async function authorize(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   try {
@@ -33,19 +47,11 @@ async function authorize(request: Request, env: Env): Promise<Response> {
       const auth = await oauth.parseAuthRequest(request);
       const details = await oauth.describeConsent(auth);
       const consent = await oauth.beginConsent(auth);
-      consent.headers.set('Content-Type', 'text/html; charset=utf-8');
-      consent.headers.set('Cache-Control', 'no-store');
-      // form-action applies to the whole redirect chain after submit, and OAuth clients may redirect further, so it is omitted here.
-      consent.headers.set('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
-      return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Authorize X Reply Guard</title>
-<h1>Authorize X Reply Guard</h1>
-<p>Allow ${html(details.clientName)} to read X mentions and posts, create drafts, and publish drafts?</p>
-<form method="post" action="/authorize"><input type="hidden" name="handle" value="${html(consent.handle)}">
-<label>Password <input type="password" name="password" required autocomplete="current-password" maxlength="1024"></label>
-<button name="decision" value="approve">Allow</button><button name="decision" value="deny" formnovalidate>Deny</button></form></html>`, { headers: consent.headers });
+      // Sets the HTML, no-store, referrer and CSP headers (see BASE_CSP for why form-action is omitted).
+      return consentPage({ clientName: details.clientName, handle: consent.handle, autoPublish: env.PUBLISH_MODE === 'auto' }, consent.headers);
     }
-    if (request.method !== 'POST') return new Response('Use GET or POST', { status: 405 });
-    if (request.headers.get('Origin') !== url.origin) return new Response('Authorization form must be submitted from this origin; restart sign-in', { status: 403 });
+    if (request.method !== 'POST') return methodNotAllowedPage();
+    if (request.headers.get('Origin') !== url.origin) return crossOriginPage();
     const form = await request.formData();
     const handle = String(form.get('handle') ?? '');
     if (form.get('decision') === 'deny') {
@@ -53,7 +59,7 @@ async function authorize(request: Request, env: Env): Promise<Response> {
       return new Response(null, { status: 302, headers: denied.headers });
     }
     if (form.get('decision') !== 'approve' || !await passwordMatches(String(form.get('password') ?? ''), env.AUTH_PASSWORD)) {
-      return new Response('Incorrect authorization password. Restart sign-in and use the AUTH_PASSWORD configured on this Worker.', { status: 403, headers: { 'Cache-Control': 'no-store' } });
+      return wrongPasswordPage(consentPageUrl(request, url));
     }
     const approved = await oauth.approveConsent(request, handle);
     const { redirectTo } = await oauth.completeAuthorization({
@@ -65,7 +71,7 @@ async function authorize(request: Request, env: Env): Promise<Response> {
   } catch (error) {
     if (error instanceof AuthorizationError && error.redirectTo) return Response.redirect(error.redirectTo, 302);
     if (error instanceof AuthorizationError || error instanceof CimdFetchError) {
-      return new Response(`Authorization failed: ${error.message}. Restart sign-in from your MCP client.`, { status: 400 });
+      return authorizationFailedPage(error.message);
     }
     throw error;
   }
