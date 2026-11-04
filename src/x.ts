@@ -11,8 +11,11 @@ export function id(value: unknown): string {
   if (typeof value !== 'string' || !/^\d{1,25}$/.test(value)) throw new Error('Post/user ID must be a numeric string');
   return value;
 }
+/** Calls the global fetch with no receiver. Storing `fetch` itself and calling it as a method
+ * (`this.fetcher(...)`) throws "Illegal invocation" in workerd. */
+export const globalFetch: Fetcher = (request) => fetch(request);
 export class XClient {
-  constructor(private env: Env, private fetcher: Fetcher = fetch) {}
+  constructor(private env: Env, private fetcher: Fetcher = globalFetch) {}
   private async request(path: string, body?: unknown): Promise<XResponse> {
     const url = `https://api.x.com/2/${path}`;
     const method = body ? 'POST' : 'GET';

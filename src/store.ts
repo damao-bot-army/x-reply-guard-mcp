@@ -1,7 +1,7 @@
 import type { Audit, Draft, Env, Fetcher, StoreData } from './types';
 import { checkText, constantTimeEqual, digest, hmac, html, mode, passwordMatches, positive, randomHex, redact, untrusted } from './security';
 import { PROTOCOLS, toolResult, validate } from './mcp';
-import { XClient, id } from './x';
+import { XClient, globalFetch, id } from './x';
 import { TOOLS } from './mcp';
 import { loadState, saveState, type Storage } from './persistence';
 import { BodyLimitError, readLimited } from './http';
@@ -19,7 +19,7 @@ const draftId = (value: unknown): string => {
 export class GuardService {
   private queue: Promise<unknown> = Promise.resolve();
   private x: XClient;
-  constructor(private storage: Storage, private env: Env, fetcher: Fetcher = fetch, private now: () => number = Date.now) {
+  constructor(private storage: Storage, private env: Env, fetcher: Fetcher = globalFetch, private now: () => number = Date.now) {
     this.x = new XClient(env, fetcher);
   }
   fetch(request: Request): Promise<Response> {
@@ -53,7 +53,9 @@ export class GuardService {
     const headers = new Headers(response.headers);
     headers.set('Cache-Control', 'no-store');
     headers.set('X-Content-Type-Options', 'nosniff');
-    headers.set('Referrer-Policy', 'no-referrer');
+    // Not no-referrer: under no-referrer browsers send `Origin: null` on same-origin form POSTs,
+    // which the strict Origin check on the approval form rejects. same-origin still sends nothing cross-origin.
+    headers.set('Referrer-Policy', 'same-origin');
     return new Response(text, { status: response.status, headers });
   }
   private async call(name: string, args: unknown, origin: string): Promise<unknown> {

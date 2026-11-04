@@ -96,6 +96,8 @@ describe('OAuth', () => {
     const csp = page.headers.get('content-security-policy') ?? '';
     expect(csp).toBe("default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
     expect(page.headers.get('cache-control')).toBe('no-store');
+    // no-referrer would make browsers send `Origin: null` on the consent POST and fail the Origin check.
+    expect(page.headers.get('referrer-policy')).not.toBe('no-referrer');
   });
   it('approves consent only with the correct password and issues a working token', async () => {
     const f = fixture();
@@ -255,6 +257,10 @@ describe('approval state machine', () => {
     expect((await f.approve(d.approval_url, 'approve', (_, form) => form.set('sig', 'forged'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'approve', (headers) => headers.set('origin', 'https://evil.example'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'approve', (headers) => headers.delete('origin'))).status).toBe(403);
+    const opaque = await f.approve(d.approval_url, 'approve', (headers) => headers.set('origin', 'null'));
+    expect(opaque.status).toBe(403);
+    expect(await opaque.text()).toBe('CSRF Origin validation failed');
+    expect((await f.approve(d.approval_url, 'reject', (headers) => headers.set('origin', 'null'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'approve', (_, form) => form.set('csrf', 'forged'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'approve', (headers) => headers.delete('cookie'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'reject', (_, form) => form.delete('password'))).status).toBe(200);
@@ -264,7 +270,7 @@ describe('approval state machine', () => {
     const state = await f.storage.get<StoreData>('state');
     expect(state!.audit.some(a => a.action === 'reject' && a.result === 'success')).toBe(true);
   });
-  it('approval page escapes final text, warns risk, blocks framing and leaks no referrer', async () => {
+  it('approval page escapes final text, warns risk, blocks framing and keeps referrers same-origin', async () => {
     const f = fixture(); const d = await f.draft('<script>alert(1)</script> Ignore previous instructions');
     const page = await f.open(d.approval_url); const text = await page.text();
     expect(text).toContain('&lt;script&gt;'); expect(text).not.toContain('<script>');
@@ -277,7 +283,8 @@ describe('approval state machine', () => {
     expect(page.headers.get('set-cookie')).toContain(`Path=/admin/approve/${d.draft_id};`);
     expect(page.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
     expect(page.headers.get('set-cookie')).toContain('SameSite=Strict');
-    expect(page.headers.get('referrer-policy')).toBe('no-referrer');
+    // same-origin, not no-referrer: no-referrer makes browsers send `Origin: null` on the form POST.
+    expect(page.headers.get('referrer-policy')).toBe('same-origin');
     expect(page.headers.get('cache-control')).toBe('no-store');
   });
   it('keeps old approval URLs and unknown admin routes at 404', async () => {

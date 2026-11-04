@@ -46,6 +46,8 @@ async function rpc(method, params = {}) {
 async function approvalForm(url) {
   const page = await fetch(url);
   assert.equal(page.status, 200);
+  // no-referrer would make real browsers send `Origin: null` on the form POST below.
+  assert.equal(page.headers.get('referrer-policy'), 'same-origin');
   const html = await page.text();
   assert.match(html, /type="password" name="password"/);
   const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
