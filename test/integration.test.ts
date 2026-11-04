@@ -181,7 +181,8 @@ describe('read path and official X requests', () => {
     expect(request.url).toContain('/2/users/42/mentions?');
     expect(request.url).toContain('since_id=90');
     expect(request.headers.get('authorization')).toMatch(/^OAuth .*oauth_signature=/);
-    expect(request.redirect).toBe('error');
+    expect(request.redirect).toBe('manual');
+    expect(request.headers.get('content-type')).toBeNull();
   });
   it('returns parent author and conversation context', async () => {
     const f = fixture();
@@ -202,11 +203,22 @@ describe('read path and official X requests', () => {
     const f = fixture({}, async () => new Response('private', { status: 429, headers: { 'retry-after': '120' } }));
     expectError(await f.call('get_mentions'), 'retry_after_seconds=120');
   });
-  it('does not reflect thrown fetch errors', async () => {
-    const f = fixture({}, async () => { throw new Error('leaked-in-exception'); });
+  it('reports a redacted, truncated cause for thrown fetch errors', async () => {
+    let env!: ReturnType<typeof fixture>['env'];
+    const f = fixture({}, async () => { throw new TypeError(`boom ${env.X_ACCESS_TOKEN_SECRET} ${env.X_API_KEY} ${'z'.repeat(500)}`); });
+    env = f.env;
     const result = await f.call('get_post', { post_id: '100' });
     expectError(result, 'network error');
-    expect(JSON.stringify(result)).not.toContain('leaked-in-exception');
+    const text = JSON.stringify(result);
+    expect(text).toContain('(cause: TypeError: boom [REDACTED] [REDACTED] z');
+    expect(text).not.toContain(env.X_ACCESS_TOKEN_SECRET);
+    expect(text).not.toContain(env.X_API_KEY);
+    expect(text).not.toContain('z'.repeat(121));
+  });
+  it.each([301, 302, 307])('refuses to follow an X redirect (%s)', async status => {
+    const f = fixture({}, async () => new Response(null, { status, headers: { location: 'https://evil.example/' } }));
+    expectError(await f.call('get_post', { post_id: '100' }), `unexpected redirect (${status})`);
+    expect(f.requests).toHaveLength(1);
   });
 });
 
