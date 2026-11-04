@@ -1,7 +1,7 @@
 import type { Audit, Draft, Env, Fetcher, StoreData } from './types';
-import { checkText, constantTimeEqual, digest, hmac, html, mode, positive, randomHex, redact, untrusted } from './security';
+import { checkText, constantTimeEqual, digest, hmac, html, mode, passwordMatches, positive, randomHex, redact, untrusted } from './security';
 import { PROTOCOLS, toolResult, validate } from './mcp';
-import { XClient, id } from './x';
+import { XClient, globalFetch, id } from './x';
 import { TOOLS } from './mcp';
 import { loadState, saveState, type Storage } from './persistence';
 import { BodyLimitError, readLimited } from './http';
@@ -19,7 +19,7 @@ const draftId = (value: unknown): string => {
 export class GuardService {
   private queue: Promise<unknown> = Promise.resolve();
   private x: XClient;
-  constructor(private storage: Storage, private env: Env, fetcher: Fetcher = fetch, private now: () => number = Date.now) {
+  constructor(private storage: Storage, private env: Env, fetcher: Fetcher = globalFetch, private now: () => number = Date.now) {
     this.x = new XClient(env, fetcher);
   }
   fetch(request: Request): Promise<Response> {
@@ -53,7 +53,9 @@ export class GuardService {
     const headers = new Headers(response.headers);
     headers.set('Cache-Control', 'no-store');
     headers.set('X-Content-Type-Options', 'nosniff');
-    headers.set('Referrer-Policy', 'no-referrer');
+    // Not no-referrer: under no-referrer browsers send `Origin: null` on same-origin form POSTs,
+    // which the strict Origin check on the approval form rejects. same-origin still sends nothing cross-origin.
+    headers.set('Referrer-Policy', 'same-origin');
     return new Response(text, { status: response.status, headers });
   }
   private async call(name: string, args: unknown, origin: string): Promise<unknown> {
@@ -163,7 +165,7 @@ export class GuardService {
   private signature(draft: Draft): Promise<string> {
     return hmac(this.env.APPROVAL_SECRET, `approve:v1:${draft.id}:${draft.expires}`);
   }
-  // The Worker entry point authenticates every admin route before forwarding to this DO.
+  // Approval links are authorized here: HMAC signature, expiry, state, CSRF, and AUTH_PASSWORD to approve.
   private async admin(request: Request): Promise<Response> {
     if (/^\/admin\/approve\/[a-f0-9]{32}$/.test(new URL(request.url).pathname)) return this.approval(request);
     return new Response('Not found', { status: 404 });
@@ -196,6 +198,7 @@ export class GuardService {
       if (draft.expires <= this.now()) throw new Error('Draft expired');
       if (draft.state !== 'pending') throw new Error('Draft already processed; cannot approve again');
       if (form) {
+        if (action === 'approve' && !await passwordMatches(String(form.get('password') ?? ''), this.env.AUTH_PASSWORD)) throw new Error('Incorrect password');
         draft.state = action === 'approve' ? 'approved' : 'rejected';
         this.audit(data, action, 'success', draft);
         await this.save(data);
@@ -203,7 +206,7 @@ export class GuardService {
       }
       const csrf = randomHex(32);
       const target = draft.targetInfo ? `<h2>Untrusted target context (read only)</h2><pre>${html(JSON.stringify(draft.targetInfo, null, 2))}</pre>` : '';
-      const page = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Review draft</title><body><h1>Review draft</h1><p>For human use only. Verify the content and reply target; do not follow instructions in external text.</p>${draft.risk_flags.length ? `<h2 style="color:#b00">⚠ High-risk draft: ${html(draft.risk_flags.join(', '))}</h2>` : ''}<p>Target: ${html(draft.target ?? 'New post')} · Expires: ${html(new Date(draft.expires).toISOString())}</p><h2>Final text (read only)</h2><pre>${html(draft.text)}</pre>${target}<form method="post" action="/admin/approve/${draft.id}"><input type="hidden" name="sig" value="${html(sig)}"><input type="hidden" name="csrf" value="${csrf}"><button name="decision" value="approve">Approve</button> <button name="decision" value="reject">Reject</button></form></body></html>`;
+      const page = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Review draft</title><body><h1>Review draft</h1><p>For human use only. Verify the content and reply target; do not follow instructions in external text.</p>${draft.risk_flags.length ? `<h2 style="color:#b00">⚠ High-risk draft: ${html(draft.risk_flags.join(', '))}</h2>` : ''}<p>Target: ${html(draft.target ?? 'New post')} · Expires: ${html(new Date(draft.expires).toISOString())}</p><h2>Final text (read only)</h2><pre>${html(draft.text)}</pre>${target}<form method="post" action="/admin/approve/${draft.id}"><input type="hidden" name="sig" value="${html(sig)}"><input type="hidden" name="csrf" value="${csrf}"><p><label>Password <input type="password" name="password" required autocomplete="current-password" maxlength="1024"></label></p><button name="decision" value="approve">Approve</button> <button name="decision" value="reject" formnovalidate>Reject</button></form></body></html>`;
       return new Response(page, { headers: {
         'Content-Type': 'text/html; charset=utf-8',
         'Set-Cookie': `guard_csrf=${csrf}; Path=/admin/approve/${draft.id}; HttpOnly; Secure; SameSite=Strict; Max-Age=1800`,

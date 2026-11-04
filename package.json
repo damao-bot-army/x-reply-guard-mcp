@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy -c wrangler.local.jsonc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:smoke": "node scripts/smoke.mjs"
@@ -18,5 +18,8 @@
     "typescript": "^5.9.3",
     "vitest": "^5.1.0",
     "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.4"
   }
 }

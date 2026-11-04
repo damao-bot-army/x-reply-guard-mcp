@@ -14,7 +14,7 @@ A self-hosted MCP service on Cloudflare Workers with a shared Durable Object, le
 This project is for people who connect Grok Bot or another MCP client to their own X account and want a human to approve each post in a browser before it is published.
 
 - **Maturity:** early development, version 0.1.0. The author has not deployed it yet.
-- **Requirements:** a Cloudflare account with Workers and Durable Objects enabled; Cloudflare Zero Trust Access to protect `/admin`; an X developer application with OAuth 1.0a user-context Read and Write permissions on an X API plan that includes mentions, post lookup, and post creation; an MCP client that supports Streamable HTTP servers with a custom `Authorization` header; Node.js 22.12+ and npm.
+- **Requirements:** a Cloudflare account with Workers, Workers KV, and Durable Objects enabled; an X developer application with OAuth 1.0a user-context Read and Write permissions on an X API plan that includes mentions, post lookup, and post creation; an MCP client that supports remote Streamable HTTP servers with OAuth; Node.js 22.12+ and npm.
 - **Releases:** none yet. Deploy from source using the [deployment instructions](#deployment) below.
 
 For bug reports and development checks, see [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately as described in [SECURITY.md](SECURITY.md).
@@ -34,6 +34,11 @@ Direct messages, deletion, likes, reposts, follows, profile changes, media uploa
 
 ## Security design
 
+### Sign-in
+
+- `/mcp` is protected by `@cloudflare/workers-oauth-provider`: OAuth 2.1 with PKCE, dynamic client registration, and Client ID Metadata Documents. Requests without a valid token get `401` with a `WWW-Authenticate` header that points to the OAuth discovery metadata. Tokens must carry the `x` scope.
+- When a client signs in, the consent page at `/authorize` asks for `AUTH_PASSWORD`. The owner enters it and clicks **Allow**, or clicks **Deny**. The form must be posted from the Worker's own origin, and the password is compared in constant time after SHA-256 hashing.
+
 ### Read path: external content is not instructions
 
 - Only known fields are projected; raw X JSON and upstream error bodies are never passed through.
@@ -44,28 +49,28 @@ Direct messages, deletion, likes, reposts, follows, profile changes, media uploa
 ### Write path: enforced by the server
 
 1. `draft_*` **never publishes**. It creates a random 128-bit ID and stores immutable final text, hash, target, and TTL.
-2. Default `approval` mode returns a signed `/admin/approve/<id>` link. Cloudflare Access protects all `/admin/*` routes, and the Worker independently validates the Access JWT on every GET and POST. Missing configuration or failed verification returns a generic 403. The link alone does not authorize access or approval.
-3. A human opens the link in a trusted browser, signs in through Access, checks the text/target/risk warning, and clicks Approve or Reject. **There is no password field.** `APPROVAL_SECRET` is only a domain-separated HMAC-SHA256 signing key stored server-side; humans never need to know or enter it. Do not give this key, Access sessions, or Access assertions to the bot.
-4. Approval POST still checks the link HMAC, expiration, pending state, same-origin `Origin`, and a random double-submit CSRF token in an HttpOnly/Secure/SameSite=Strict cookie scoped to `/admin/approve/<id>`. HTML escapes all text and target information, highlights risks, disables scripts/frames/third-party resources through CSP, and sets no-store/no-referrer.
+2. Default `approval` mode returns a `/admin/approve/<id>` link signed with HMAC-SHA256 over the draft ID and expiration. `APPROVAL_SECRET` is only this server-side signing key; humans never need to know or enter it.
+3. A human opens the link in a trusted browser and checks the text/target/risk warning. To approve, they enter `AUTH_PASSWORD` and click Approve. Reject needs no password. Do not give `AUTH_PASSWORD` or `APPROVAL_SECRET` to the bot.
+4. The page and the form POST check the link HMAC, expiration, and pending state. The POST also checks same-origin `Origin` and a random double-submit CSRF token in an HttpOnly/Secure/SameSite=Strict cookie scoped to `/admin/approve/<id>`, and Approve checks `AUTH_PASSWORD` in constant time. A wrong password leaves the draft pending and is recorded in the audit log. HTML escapes all text and target information, highlights risks, disables scripts/frames/third-party resources through CSP, and sets `Cache-Control: no-store` and `Referrer-Policy: same-origin` (not `no-referrer`, which makes browsers send `Origin: null` on the same-origin form POST; `Origin: null` is rejected).
 5. `publish` runs serially inside the DO. It checks expiration and rejected/used states; approval mode additionally requires human approval. Each draft is single-use. Switching from auto back to approval does not grant approval to pending drafts. **Approval is not publication**: the MCP client must still call `publish` afterward.
 6. Replies are allowed only when X mention entities name this account, or a live conversation-root lookup confirms this account started the conversation. `in_reply_to_user_id` alone is insufficient. The target is checked again before publication.
 7. Text must be nonempty and roughly at most 280 Unicode code points, with HTTP(S) URLs counted as 23 characters. Checks reject the raw, NFKC, sanitized, and URL-encoded forms of all six configured secrets, plus suspicious `sk-`, `Bearer `, long hex/base64 patterns. Both original and cleaned text are checked against hidden-character secret splitting. SHA-256 hashes of normalized, stripped, trimmed text prevent duplication against the last 50 published/reserved texts.
 8. Risky drafts may be reviewed in approval mode, but auto mode refuses them. Publication rechecks risk and content so switching modes cannot send risky drafts in auto mode.
 9. All clients share one fixed-name DO. Its serial queue covers network awaits. **Before X POST**, a durable transaction marks the draft used and reserves quota and deduplication state. Concurrent calls or DO restarts cannot send the same draft again. Large snapshots are chunked and committed in one transaction.
 10. Quotas use **UTC clock hours and calendar days**, defaulting to 5/hour and 20/day. Counts include published and reserved attempts. X errors, timeouts, or crashes **do not roll back** the used flag, quota, or deduplication reservation, avoiding duplicate posts under uncertain outcomes. Check X manually before deciding whether to create a different draft; never automatically retry identical content.
-11. Draft/approve/reject/publish successes, failures, and pre-send reservations record time, action, draft ID, target, text hash, and result, not text bodies. The last 500 audit entries are retained; status returns 20. Expired drafts are cleaned up 24 hours after expiration during later operations, with a maximum of 1,000 drafts. Long-term production audit archives must be separately controlled and unavailable to MCP clients. Access failures are logged in Worker logs as `access_denied` with fixed reason categories, never tokens, claims, URLs, or upstream details.
+11. Draft/approve/reject/publish successes, failures, and pre-send reservations record time, action, draft ID, target, text hash, and result, not text bodies. The last 500 audit entries are retained; status returns 20. Expired drafts are cleaned up 24 hours after expiration during later operations, with a maximum of 1,000 drafts. Long-term production audit archives must be separately controlled and unavailable to MCP clients.
 12. Last-mile redaction covers tool results, HTML, and errors. Requests, credentials, and raw X errors are not logged. X 401/403/404/429 map to fixed messages; 429 includes `retry_after_seconds`. X fetch forbids redirects and times out after 15 seconds. Limits: MCP body 32 KiB, approval POST 4 KiB, X response 2 MiB.
 
 `auto` explicitly lowers the human-authorization requirement: an AI may publish any ordinary text passing the hard checks. Risk rules are not semantic moderation. Keep `approval` if **every post must be human-authorized**.
 
 ## Data storage
 
-Everything runs in your own Cloudflare account. The Worker sends outbound requests only to `api.x.com` and to your Access team's `/cdn-cgi/access/certs` endpoint.
+Everything runs in your own Cloudflare account. The Worker sends outbound requests only to `api.x.com` and, when an MCP client identifies itself with a Client ID Metadata Document, to that client's metadata URL.
 
-- **Worker secrets:** `MCP_BEARER_TOKEN`, `APPROVAL_SECRET`, and the four X credentials.
+- **Worker secrets:** `AUTH_PASSWORD`, `APPROVAL_SECRET`, and the four X credentials.
 - **Durable Object storage:** one fixed-name `GuardStore` object (binding `GUARD_STORE`, SQLite-backed) holds all state: drafts (final text, text hash, reply target ID, sanitized target context, risk flags, state, expiration), the last 50 published/reserved text hashes, the current UTC hour/day counters, and the last 500 audit entries (no text bodies). Drafts are deleted 24 hours after expiration during later operations.
-- **Not stored:** results of `get_mentions` and `get_post`, and raw MCP requests. Access public keys (JWKS) are cached only in Worker memory for five minutes.
-- **Worker logs:** `access_denied` events with a fixed reason category.
+- **KV (`OAUTH_KV`):** OAuth clients, grants, and tokens, managed by `@cloudflare/workers-oauth-provider`. Tokens and secrets are stored only as hashes.
+- **Not stored:** results of `get_mentions` and `get_post`, and raw MCP requests.
 
 ## Deployment
 
@@ -73,108 +78,92 @@ Everything runs in your own Cloudflare account. The Worker sends outbound reques
 
 Create your own project/application in the X Developer Portal and enable **OAuth 1.0a user-context Read and Write**. Regenerate this account's Access Token/Secret after permission changes. Prepare API Key/Secret, Access Token/Secret, the account's numeric User ID, and username without `@`. Your X API plan must support mentions, single-post reads, and post creation; X plan/endpoint limits are independent of this service's quotas.
 
-This version supports **one account and one shared client trust domain**, without OAuth redirects, multi-user login, or token refresh flows.
+This version supports **one X account and one owner**; every MCP client the owner authorizes acts for that owner.
 
 ### 2. Install and configure
 
-Use Node.js 22.12+, npm, and a Cloudflare account with Workers and Durable Objects enabled. Durable Objects use SQLite migration `v1`.
+Use Node.js 22.12+, npm, and a Cloudflare account with Workers, Workers KV, and Durable Objects enabled.
 
 ```sh
 npm ci
 npx wrangler login
+npx wrangler kv namespace create OAUTH_KV   # prints the namespace ID
+cp wrangler.local.jsonc.example wrangler.local.jsonc
 ```
 
-Edit the Worker name, `X_USER_ID`, and `X_USERNAME` in `wrangler.toml`. Keep `PUBLISH_MODE = "approval"`. Replace the Access placeholders using the next section.
+The committed `wrangler.jsonc` holds placeholders only and is used for local development, tests, and CI. Put your real values in the git-ignored `wrangler.local.jsonc`: `X_USER_ID`, `X_USERNAME`, the `OAUTH_KV` namespace ID, and optionally a custom domain under `routes` (remove `routes` to use `x-reply-guard-mcp.<your-subdomain>.workers.dev`). Keep `PUBLISH_MODE` at `approval`.
 
-Generate two distinct high-entropy random values (at least 32 random bytes recommended, using a password manager or `openssl rand -hex 32`). Store them through interactive secret prompts, not config files or command-line arguments:
+Choose a long random `AUTH_PASSWORD` and a different high-entropy `APPROVAL_SECRET` (for example `openssl rand -hex 32`). Store all secrets through the interactive prompts, not config files or command-line arguments, then deploy:
 
 ```sh
-npx wrangler secret put MCP_BEARER_TOKEN
-npx wrangler secret put APPROVAL_SECRET
-npx wrangler secret put X_API_KEY
-npx wrangler secret put X_API_SECRET
-npx wrangler secret put X_ACCESS_TOKEN
-npx wrangler secret put X_ACCESS_TOKEN_SECRET
+npx wrangler secret put AUTH_PASSWORD -c wrangler.local.jsonc
+npx wrangler secret put APPROVAL_SECRET -c wrangler.local.jsonc
+npx wrangler secret put X_API_KEY -c wrangler.local.jsonc
+npx wrangler secret put X_API_SECRET -c wrangler.local.jsonc
+npx wrangler secret put X_ACCESS_TOKEN -c wrangler.local.jsonc
+npx wrangler secret put X_ACCESS_TOKEN_SECRET -c wrangler.local.jsonc
+npx wrangler deploy --dry-run -c wrangler.local.jsonc --outdir dist
 npm run deploy
-# Equivalent to npx wrangler deploy; first deployment creates the DO migration.
+# Runs wrangler deploy -c wrangler.local.jsonc; the first deployment applies the Durable Object migration v1.
 ```
 
-Never reuse `APPROVAL_SECRET` as the MCP Bearer or an X credential. It is solely a server-side signing key, not a human passphrase. This repository contains placeholders and test credentials only; `.dev.vars.example` is a local template.
+This repository contains placeholders and test credentials only; `.dev.vars.example` and `wrangler.local.jsonc.example` are templates.
 
 | Setting | Type | Default / meaning |
 | --- | --- | --- |
-| `MCP_BEARER_TOKEN` | secret | Shared `/mcp` credential, compared in constant time after fixed-length SHA-256 hashing |
+| `AUTH_PASSWORD` | secret | Owner password for the OAuth consent page and the Approve button, compared in constant time after SHA-256 hashing |
 | `APPROVAL_SECRET` | secret | Server-only approval-link HMAC-SHA256 key |
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET` | secret | X OAuth 1.0a user credentials |
-| `ACCESS_TEAM_DOMAIN` | var | Required for admin: team hostname, e.g. `your-team.cloudflareaccess.com`, without scheme/path |
-| `ACCESS_AUD` | var | Required for admin: Access application's Audience (AUD) tag |
-| `ACCESS_ALLOWED_EMAILS` | optional var | Comma-separated email allowlist, trimmed and case-insensitive; if set, JWT email must match. An empty list denies everyone |
 | `X_USER_ID`, `X_USERNAME` | var | Account ID / username |
 | `PUBLISH_MODE` | var | `approval` (default if omitted) or `auto`; any other value makes `draft_*`, `publish`, and `get_status` fail with a configuration error |
 | `MAX_POSTS_PER_HOUR` | var | 5; positive integer |
 | `MAX_POSTS_PER_DAY` | var | 20; positive integer |
 | `DRAFT_TTL_MINUTES` | var | 30; positive integer |
+| `GUARD_STORE` | Durable Object binding | Class `GuardStore`, SQLite migration `v1`; holds all guard state |
+| `OAUTH_KV` | KV binding | OAuth clients, grants, and tokens |
 
-Grok Bot needs only the MCP Bearer. Do not grant it Cloudflare administration credentials, Worker secret-management access, server filesystem access, or your browser's Access identity/session.
-
-### Cloudflare Access setup
-
-1. In **Cloudflare Zero Trust → Access → Applications**, create a **self-hosted application** covering `<worker-host>/admin/*` (for example `x-reply-guard.example.com/admin/*`). Use the same hostname as the MCP URL so generated links reach the protected host.
-2. Configure an **Allow policy restricted to your own email address**, using your preferred identity provider or email one-time PIN. Do not add public Bypass policies or machine/service-token approvals for this application.
-3. Copy the application's **Application Audience (AUD) tag** into `ACCESS_AUD`.
-4. Set `ACCESS_TEAM_DOMAIN` to your Zero Trust team domain, e.g. `your-team.cloudflareaccess.com`, without `https://` or a trailing slash.
-5. Optionally set `ACCESS_ALLOWED_EMAILS` to your email for defense in depth. The template includes `owner@example.com`; replace it, or remove the setting entirely to rely on the Access application's policy.
-6. Deploy the updated configuration, open a draft's approval link in a browser, sign in, and approve/reject without entering a Worker secret.
-
-**Do not cover `/mcp` with Access.** It is a machine endpoint authenticated only by its existing Bearer token. Do not create a host-wide Access application that accidentally captures it. If you expose other hostnames or Worker aliases, protect their admin paths too; the Worker's JWT check still fails closed if the edge policy is missing. `/health` is a public liveness check and makes no X authentication probe.
-
-The Worker reads only `Cf-Access-Jwt-Assertion`; it does not trust identity headers or a client-supplied Access cookie as authentication. It verifies RS256 with WebCrypto using the matching `kid` from `https://<ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs`, then checks exact issuer, audience membership, required expiration, optional `nbf`, and optional email allowlist. Clock tolerance is 30 seconds. JWKS are cached in memory for five minutes; an unknown key can trigger one refresh, throttled to at most one per second. Fetches forbid redirects, have a five-second timeout and a 256 KiB response limit. Verification failures return only `Forbidden` (403). Missing Access config blocks admin only; `/mcp` keeps working with its Bearer and service credentials.
+If any of the six secrets is missing, authorized `/mcp` requests and `/admin` pages return 503.
 
 ### 3. Add a custom MCP in Grok Bot
 
-Use a client supporting **Streamable HTTP** custom MCP servers:
+In Grok Bot or another MCP client that supports remote **Streamable HTTP** servers with OAuth, add the server URL:
 
-- URL: `https://<worker>/mcp`
-- Custom header: `Authorization: Bearer <MCP_BEARER_TOKEN>`
-- Transport: Streamable HTTP, not legacy HTTP+SSE
-
-Adapt JSON field names to your host, for example:
-
-```json
-{
-  "mcpServers": {
-    "x-reply-guard": {
-      "url": "https://<worker>/mcp",
-      "headers": { "Authorization": "Bearer <MCP_BEARER_TOKEN>" }
-    }
-  }
-}
+```text
+https://<worker-host>/mcp
 ```
 
-Host-specific UI/config formats vary; the essentials are the HTTP MCP URL and Bearer header. Never add `APPROVAL_SECRET`, Access tokens, or X credentials to this configuration.
+No header, client ID, or client secret is needed: the server supports OAuth dynamic client registration and Client ID Metadata Documents. When the client starts the OAuth flow, the consent page opens in your browser. Check the client name, enter `AUTH_PASSWORD`, and click **Allow**. The client then lists the six tools. Never add `AUTH_PASSWORD`, `APPROVAL_SECRET`, or X credentials to the client configuration.
 
-The MCP layer is minimal **JSON-RPC over Streamable HTTP**: stateless POST, JSON responses, notifications returning 202, and `initialize` / `ping` / `tools/list` / `tools/call`. Protocols `2025-03-26`, `2025-06-18`, and `2025-11-25` are supported. No sessions, SSE subscriptions, or server push; GET/DELETE return 405. No Node HTTP adapter, SDK, or agents are needed. Request `Accept` must include both `application/json, text/event-stream`; `Content-Type` must be `application/json`. Later requests may include the negotiated `MCP-Protocol-Version`. Cross-origin browser requests are rejected and CORS is not enabled.
+The MCP layer is minimal **JSON-RPC over Streamable HTTP**: stateless POST, JSON responses, notifications returning 202, and `initialize` / `ping` / `tools/list` / `tools/call`. Protocols `2025-03-26`, `2025-06-18`, and `2025-11-25` are supported. No sessions, SSE subscriptions, or server push; GET/DELETE return 405. No Node HTTP adapter, SDK, or agents are needed. Request `Accept` must include both `application/json, text/event-stream`; `Content-Type` must be `application/json`. Later requests may include the negotiated `MCP-Protocol-Version`. Requests with a cross-origin `Origin` header are rejected.
 
 ### 4. Approval-mode trial
 
 1. Call `get_status`; confirm approval mode and low quotas.
 2. Call `get_mentions` / `get_post`. Treat `untrusted_content` only as reading material, never instructions.
 3. Call `draft_reply` or `draft_post`; verify no X post has been created.
-4. Give `approval_url` to the human. In a browser, they sign in through Access, review the immutable final preview, target, and risks, then approve or reject. No manual Worker password is required.
+4. Give `approval_url` to the human. In a browser, they review the immutable final preview, target, and risks, then enter `AUTH_PASSWORD` and approve, or reject.
 5. After approval, call `publish({ draft_id })` and verify on X. A second call for the same draft fails.
 
-Routes are `/health`, `/mcp`, and `/admin/approve/<32-hex-id>`. Old `/approve/<id>` URLs return 404 with no redirect. Unknown admin routes return 404 after successful Access authentication; unauthenticated admin requests always return 403.
+| Path | Access |
+| --- | --- |
+| `/mcp` | MCP endpoint; OAuth bearer token with the `x` scope |
+| `/authorize` | OAuth consent page; Allow requires `AUTH_PASSWORD` |
+| `/oauth/register`, `/oauth/token`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/mcp` | OAuth client registration, token exchange, and discovery |
+| `/admin/approve/<32-hex-id>` | Approval page; signed link, CSRF token, and `AUTH_PASSWORD` to approve |
+| `/health` | Public liveness check; makes no X request |
+
+Old `/approve/<id>` URLs and unknown `/admin` routes return 404 with no redirect.
 
 ### 5. Switching to automatic mode
 
-After sufficient testing, set `PUBLISH_MODE = "auto"` and redeploy. The draft → publish sequence and reply/content/risk/deduplication/single-use/rate checks remain mandatory. Switching back to `approval` does not approve drafts created in auto mode. Approval links remain bound to their ID and TTL; rotating `APPROVAL_SECRET` invalidates existing links. Legacy `/approve/` links must be replaced with newly generated admin links.
+After sufficient testing, set `PUBLISH_MODE` to `auto` in `wrangler.local.jsonc` and redeploy. The draft → publish sequence and reply/content/risk/deduplication/single-use/rate checks remain mandatory. Switching back to `approval` does not approve drafts created in auto mode. Approval links remain bound to their ID and TTL; rotating `APPROVAL_SECRET` invalidates existing links. Legacy `/approve/` links must be replaced with newly generated admin links.
 
 ## Local development and verification
 
 ```sh
 npm ci
 cp .dev.vars.example .dev.vars
-# Fill only the local .dev.vars; configure account ID/username in wrangler.toml too.
+# Fill only the local .dev.vars.
 npm run dev
 # Secure approval cookies require HTTPS and a trusted local certificate:
 npm run dev -- --local-protocol https
@@ -185,35 +174,19 @@ npm run test:smoke
 npx wrangler deploy --dry-run --outdir /tmp/xrg-dist
 ```
 
-A local Worker does not bypass Access: without a valid assertion its admin pages return 403. Use a properly protected deployed hostname for real browser approval, or the mocked Vitest flow for local approval development. There is no production-capable bypass switch.
+Local development uses the placeholder `wrangler.jsonc`. To read your real account locally, also set `X_USER_ID` and `X_USERNAME` in `.dev.vars`; they override the placeholders. Point an MCP client that supports OAuth at `http://localhost:8787/mcp`; the consent page asks for the `AUTH_PASSWORD` from `.dev.vars`. The dry run above checks the committed config; add `-c wrangler.local.jsonc` to check your own.
 
-Vitest uses dependency injection and mocked fetch. Global fetch allows only the fixture JWKS endpoint where needed; all X calls are mocked and there are no real external requests. Tests generate RSA keys with WebCrypto and cover Access signature/claims/configuration/email failures, JWKS caching/rotation, legacy routes, password-free approve/reject, signed links, and CSRF. Existing coverage includes two OAuth signing vectors ([official guide](https://oauth.net/core/1.0a/#sig_base_example), [RFC 5849 §3.4.1.1](https://www.rfc-editor.org/rfc/rfc5849#section-3.4.1.1)), Bearer authentication, sanitization/risk rules, exactly six tools, single-use/concurrency/restarts, auto/mode switches, reply allowlists, content/deduplication/UTC quotas, redaction, and chunked-storage transaction rollback. `GuardService` is separated from the thin Cloudflare binding layer for testing; production state remains in the real DO.
+Vitest uses dependency injection and mocked fetch; all X calls are mocked and any other global fetch fails, so there are no real external requests. OAuth tests run the real `OAuthProvider` against an in-memory KV: discovery metadata, 401 challenges, dynamic registration, the consent page and its CSP, correct/wrong/missing password, deny, cross-origin and forged consent submissions, and PKCE token exchange; every MCP test uses a token obtained through that flow. Approval tests cover signed links, CSRF, `Origin` (including `Origin: null`), the `same-origin` referrer policy, expiration, single use, legacy routes, reject without a password, and approve only with the correct password. Existing coverage includes two OAuth 1.0a signing vectors ([official guide](https://oauth.net/core/1.0a/#sig_base_example), [RFC 5849 §3.4.1.1](https://www.rfc-editor.org/rfc/rfc5849#section-3.4.1.1)), sanitization/risk rules, exactly six tools, single-use/concurrency/restarts, auto/mode switches, reply allowlists, content/deduplication/UTC quotas, redaction, and chunked-storage transaction rollback. `GuardService` is separated from the thin Cloudflare binding layer for testing; production state remains in the real DO.
 
-`npm run test:smoke` starts an isolated local Wrangler/workerd + DO with dummy credentials, verifies initialization, six-tool listing, persisted drafts, unapproved-publish rejection, missing-JWT admin GET/POST rejection (403), and old-route rejection (404). It never reads X, approves, or sends a post; temporary DO state and processes are cleaned up. Default port is 8789; override with `SMOKE_PORT`.
-
-Manual local MCP handshake (set a test-only `MCP_BEARER_TOKEN` in your terminal; do not put real values in shell history):
-
-```sh
-curl http://localhost:8787/mcp \
-  -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
-
-curl http://localhost:8787/mcp \
-  -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-```
+`npm run test:smoke` starts an isolated local Wrangler/workerd + DO with dummy X credentials and a random `AUTH_PASSWORD`, and runs the production OAuth code: the 401 challenge, discovery metadata (including Client ID Metadata Document support), dynamic registration, wrong password, deny, and consent + PKCE token. With that token it checks initialization, six-tool listing, persisted drafts, unapproved-publish rejection, forged-signature rejection, approval without or with a wrong password (403), reject without a password, approval with the password, and old-route rejection (404). It never reads X or publishes, so it makes no X requests; temporary DO state and processes are cleaned up. Default port is 8789; override with `SMOKE_PORT`.
 
 ## Initial scope and limitations
 
 - Static risk heuristics can be conservative (e.g. ordinary technical discussion mentioning "token", or long English/base64-like strings). They are not semantic moderation. Chinese/emoji length uses code points rather than X's full weighted algorithm; X ultimately determines acceptance.
 - Text only, one account. No multi-user OAuth, images, thread orchestration, background scheduling, SSE push, or approval notifications. `get_mentions` accepts `since_id` / `max_results` but no pagination token; callers may save `newest_id` for incremental reads.
-- Browser approval requires HTTPS, a trusted browser, and a restrictive Access policy. Treat signed links as sensitive, even though the link alone grants neither reading nor approval access. Never share Access sessions with an AI client.
-- Unknown send outcomes retain reservations and may consume quota without a successful post. This explicitly favors avoiding duplicates over automatic recovery. Credential cleanup/rotation, mode changes, Access policies, and long-term audit archival are operational responsibilities.
-- All MCP clients must share one trusted authorization domain. The Bearer does not distinguish users and status contains audit summaries. Admin identity is delegated to Access, with optional Worker-side email restriction; there is no separate application user database.
+- Browser approval requires HTTPS and a trusted browser. A signed link lets its holder view the draft and reject it; approving also requires `AUTH_PASSWORD`.
+- Unknown send outcomes retain reservations and may consume quota without a successful post. This explicitly favors avoiding duplicates over automatic recovery. Credential cleanup/rotation, mode changes, and long-term audit archival are operational responsibilities.
+- Every authorized MCP client acts as the single owner; clients are not separated, and status contains audit summaries. Changing `AUTH_PASSWORD` does not revoke issued OAuth tokens; to revoke all grants, use a fresh `OAUTH_KV` namespace and redeploy.
 
 ## License
 

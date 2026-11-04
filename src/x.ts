@@ -1,6 +1,6 @@
 import { authorization } from './oauth';
 import { readLimited } from './http';
-import { risks, sanitize } from './security';
+import { redact, risks, sanitize } from './security';
 import type { Env, Fetcher } from './types';
 
 type Tweet = { id: string; text: string; author_id?: string; conversation_id?: string; in_reply_to_user_id?: string; entities?: { mentions?: { username: string; id?: string }[] }; referenced_tweets?: { type: string; id: string }[] };
@@ -11,21 +11,46 @@ export function id(value: unknown): string {
   if (typeof value !== 'string' || !/^\d{1,25}$/.test(value)) throw new Error('Post/user ID must be a numeric string');
   return value;
 }
+/** Calls the global fetch with no receiver. Storing `fetch` itself and calling it as a method
+ * (`this.fetcher(...)`) throws "Illegal invocation" in workerd. */
+export const globalFetch: Fetcher = (request) => fetch(request);
+const TIMEOUT_MS = 15000;
+/** Safe diagnostic suffix built only from the thrown error's name and message: normalized and stripped of
+ * control characters, redacted against all configured secrets, and only then truncated (120 chars). */
+export function cause(error: unknown, env: Env): string {
+  const name = error instanceof Error || (typeof error === 'object' && error !== null && 'name' in error) ? String((error as { name: unknown }).name) : typeof error;
+  const message = error instanceof Error || (typeof error === 'object' && error !== null && 'message' in error) ? String((error as { message: unknown }).message) : '';
+  const clean = (text: string, limit: number) => Array.from(redact(sanitize(text, 10000), env)).slice(0, limit).join('');
+  const safeName = clean(name, 40) || 'Error';
+  const safeMessage = clean(message, 120);
+  const timeout = safeName === 'AbortError' || safeName === 'TimeoutError';
+  return ` (cause: ${timeout ? `timeout after ${TIMEOUT_MS / 1000}s, ` : ''}${safeName}${safeMessage ? `: ${safeMessage}` : ''})`;
+}
 export class XClient {
-  constructor(private env: Env, private fetcher: Fetcher = fetch) {}
+  constructor(private env: Env, private fetcher: Fetcher = globalFetch) {}
   private async request(path: string, body?: unknown): Promise<XResponse> {
     const url = `https://api.x.com/2/${path}`;
     const method = body ? 'POST' : 'GET';
+    let request: Request;
+    try {
+      const headers: Record<string, string> = { Authorization: await authorization(method, url, this.env) };
+      if (body) headers['Content-Type'] = 'application/json';
+      request = new Request(url, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        // workerd rejects redirect: 'error' with a TypeError; use 'manual' and refuse any 3xx below.
+        redirect: 'manual',
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+    } catch (error) { throw new Error(`X API request could not be built; nothing was sent${cause(error, this.env)}`); }
     let response: Response;
     try {
-      response = await this.fetcher(new Request(url, {
-        method,
-        headers: { Authorization: await authorization(method, url, this.env), 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : undefined,
-        redirect: 'error',
-        signal: AbortSignal.timeout(15000),
-      }));
-    } catch { throw new Error('X API network error or timeout; publication outcome may be unknown. Check manually; do not retry automatically'); }
+      response = await this.fetcher(request);
+    } catch (error) { throw new Error(`X API network error or timeout; publication outcome may be unknown. Check manually; do not retry automatically${cause(error, this.env)}`); }
+    if ((response.type as string) === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+      throw new Error(`X API returned an unexpected redirect (${response.status}); not followed${body ? '; publication outcome may be unknown. Check manually; do not retry automatically' : ''}`);
+    }
     if (!response.ok) {
       if (response.status === 429) {
         const raw = response.headers.get('x-rate-limit-reset');
