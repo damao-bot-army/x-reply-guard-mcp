@@ -16,6 +16,8 @@ Use Node.js 22.12+ and npm. Clone the repository, enter its directory, and insta
 npm ci
 ```
 
+Install [gitleaks](https://github.com/gitleaks/gitleaks) 8.x locally and make sure `gitleaks` is in your `PATH`. `npm ci` sets `core.hooksPath` to `.githooks`, and the pre-commit hook blocks commits when gitleaks is missing.
+
 See the README's [local development instructions](README.md#local-development-and-verification) for local Worker configuration and execution.
 
 Before submitting a pull request, run the same checks as CI:
