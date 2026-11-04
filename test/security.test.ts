@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { checkText, constantTimeEqual, html, NOTICE, passwordMatches, postLength, redact, risks, sanitize, untrusted } from '../src/security';
 import { oauthSignature } from '../src/oauth';
+import { extractUrls } from '../src/post-urls';
 import { testEnv } from './support';
 
 describe('OAuth 1.0a official vectors', () => {
@@ -97,7 +98,8 @@ describe('output checks and redaction', () => {
 });
 
 describe('X weighted post length (twitter-text v3)', () => {
-  // Expected values match twitter-text 3.1.0 parseTweet().weightedLength for the same strings.
+  // Expected values match twitter-text 3.1.0 parseTweet().weightedLength for the same strings. Emoji added
+  // after its twemoji table (Emoji 15 and later) are not covered.
   it.each([
     ['ASCII', 'Hello, world!', 13],
     ['Chinese', '\u4f60\u597d\u4e16\u754c', 8],
@@ -158,10 +160,67 @@ describe('X weighted post length (twitter-text v3)', () => {
     expect(reject(`${mixed}\ud83c\uddef\ud83c\uddf5`)).toThrow(tooLong(282));
   });
   it('counts a long URL as 23 and checks the cleaned (NFKC) text', () => {
-    const url = `https://example.com/${'x?'.repeat(100)}`;
+    const url = `https://example.com/${'page.'.repeat(40)}html`;
     expect(checkText(`${'\u597d'.repeat(128)} ${url}`, testEnv()).text).toContain(url);
     expect(reject(`${'\u597d'.repeat(129)} ${url}`)).toThrow(tooLong(282));
     // Full-width Latin is NFKC-normalized to ASCII before counting, so it counts 1, not 2.
     expect(checkText('\uff21'.repeat(10) + ' ' + 'abc '.repeat(67), testEnv()).text).toMatch(/^A{10} /);
+  });
+});
+
+describe('URLs as twitter-text 3.1.0 finds them', () => {
+  // Expected values are twitter-text 3.1.0 parseTweet().weightedLength and extractUrls() for the same strings.
+  it.each([
+    // A URL ends at the first character that cannot continue it, and trailing punctuation is left out.
+    ['URL followed by 200 Chinese characters', `https://a.co/${'\u4e2d'.repeat(200)}`, 423],
+    ['URL followed by 200 emoji', `see https://example.com/${'\ud83d\ude00'.repeat(200)}`, 427],
+    ['URL between Chinese text and punctuation', '\u8be6\u60c5\u89c1https://example.com/abc\uff0c\u6b22\u8fce\u8f6c\u53d1\uff01', 41],
+    ['URL in parentheses', '(https://example.com)', 25],
+    ['URL before a full stop', 'https://example.com.', 24],
+    ['URL in corner brackets', '\u300chttps://example.com\u300d', 27],
+    ['trailing ! and . after a path and a query', 'https://example.com/path! https://example.com?a=1&b=2.', 49],
+    ['balanced parentheses stay in the path', 'https://en.wikipedia.org/wiki/Foo_(bar)', 23],
+    ['accented Latin stays in the path', 'https://example.com/caf\u00e9', 23],
+    ['internationalized domain, path ends at CJK', 'https://\u4f8b\u5b50.\u4e2d\u56fd/\u8def\u5f84', 27],
+    ['t.co keeps only its slug', 'http://t.co/abc/def', 27],
+    // A bare domain with a known top-level domain is a URL too.
+    ['bare domain', 'visit example.com now', 33],
+    ['file name with a country-code TLD', 'run main.py', 27],
+    ['bare domain followed by an emoji', 'example.com\ud83d\ude00', 25],
+    ['no TLD, version numbers', 'node.js and v2.4.1.', 19],
+    ['e-mail address and mention are not URLs', 'user@example.com @example.com', 29],
+    // Not URLs at all: counted character by character.
+    ['no TLD', 'https://localhost/x', 19],
+    ['IP address', 'https://192.168.1.1/x', 21],
+    ['protocol glued to a word', 'xhttps://example.com', 20],
+    ['domain label over 63 characters', `https://${'a'.repeat(64)}.com`, 76],
+    ['domain label of 63 characters', `https://${'a'.repeat(63)}.com`, 23],
+    ['URL over 4096 characters', `https://example.com/${'a'.repeat(4100)}`, 4120],
+  ])('%s', (_name, text, expected) => { expect(postLength(text)).toBe(expected); });
+
+  it('finds the same URLs', () => {
+    const urls = (text: string) => extractUrls(text).map(({ url }) => url);
+    expect(urls(`https://a.co/${'\u4e2d'.repeat(3)}`)).toEqual(['https://a.co/']);
+    expect(urls('\u8be6\u60c5\u89c1https://example.com/abc\uff0c')).toEqual(['https://example.com/abc']);
+    expect(urls('(https://example.com) https://example.com.')).toEqual(['https://example.com', 'https://example.com']);
+    expect(urls('see example.com, main.py and http://t.co/abc/def')).toEqual(['example.com', 'main.py', 'http://t.co/abc']);
+    expect(urls('https://localhost/x node.js v2.4.1')).toEqual([]);
+  });
+
+  const reject = (text: string) => () => checkText(text, testEnv());
+  it('rejects text that X rejects even when it follows a URL', () => {
+    expect(reject(`https://a.co/${'\u4e2d'.repeat(200)}`)).toThrow('Text is 423 characters');
+    expect(reject(`see https://example.com/${'\ud83d\ude00'.repeat(200)}`)).toThrow('Text is 427 characters');
+  });
+  it('accepts a URL glued to Chinese text up to 280 and rejects 281', () => {
+    // As typed: 2 + 23 + 2 (full-width comma) + 126 * 2 = 279, and 127 make 281.
+    const prefix = '\u89c1https://example.com/a\uff0c';
+    expect(postLength(prefix + '\u4e2d'.repeat(126))).toBe(279);
+    expect(postLength(prefix + '\u4e2d'.repeat(127))).toBe(281);
+    // checkText() counts the text that is posted, where NFKC has made the comma ASCII (1): 127 make 280.
+    const posted = '\u89c1https://example.com/a,';
+    expect(checkText(prefix + '\u4e2d'.repeat(127), testEnv()).text).toBe(posted + '\u4e2d'.repeat(127));
+    expect(reject(prefix + '\u4e2d'.repeat(128))).toThrow('Text is 282 characters');
+    expect(reject(prefix + '\u4e2d'.repeat(129))).toThrow('Text is 284 characters');
   });
 });
