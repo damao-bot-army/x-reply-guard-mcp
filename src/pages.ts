@@ -10,7 +10,7 @@
  * Every dynamic value goes through html() from ./security, the same escaping that redact() knows
  * about. Draft text and reply-target content come from an AI client and from X: treat them as hostile.
  */
-import { html } from './security';
+import { html, MAX_POST_LENGTH, URL_LENGTH } from './security';
 
 /**
  * The directives every page starts from. On /authorize, form-action would apply to the whole
@@ -261,6 +261,8 @@ label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 620; }
 .meta { min-width: 0; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .count { flex: none; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .count strong { color: var(--text); font-weight: 640; }
+.count.over { padding: 1px 9px; border-radius: 999px; background: var(--danger-soft); color: var(--danger); font-weight: 600; }
+.count.over strong { color: var(--danger); }
 .post { padding: 14px 16px; border-radius: 16px; border: 1px solid var(--border); background: var(--surface-2); }
 .post-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .post .initial { flex: none; width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--surface); border: 1px solid var(--border); font-weight: 650; line-height: 1; }
@@ -565,7 +567,7 @@ export interface ApprovalView {
   csrf: string;
   /** The final draft text. Untrusted. */
   text: string;
-  /** postLength() of the text. */
+  /** postLength() of the text: its length as X counts it (CJK and emoji 2, URLs 23), not code points. */
   length: number;
   riskFlags: string[];
   expires: number;
@@ -599,6 +601,10 @@ ${post}
 </article>
 </section>`;
   }
+  // Drafts over the limit cannot be created, but one made under an older counting rule can still be
+  // pending; publish() would refuse it, so the count says so.
+  const over = view.length > MAX_POST_LENGTH;
+  const count = `<span class="count${over ? ' over' : ''}" title="Counted the way X counts: CJK characters and emoji count as 2, each URL as ${URL_LENGTH}"><strong>${view.length}</strong> / ${MAX_POST_LENGTH}<span class="sr-only"> characters${over ? ', over the limit' : ''}</span></span>`;
   return htmlPage({
     title: `Review ${kind}`,
     headers,
@@ -616,7 +622,7 @@ ${post}
 ${risk}
 ${target}
 <section aria-labelledby="draft-label">
-<div class="section-head"><h2 class="section-label" id="draft-label">Your ${kind}</h2><span class="count"><strong>${view.length}</strong> / 280<span class="sr-only"> characters</span></span></div>
+<div class="section-head"><h2 class="section-label" id="draft-label">Your ${kind}</h2>${count}</div>
 <p class="draft">${html(view.text)}</p>
 </section>
 <p class="note">${icon('shieldCheck')}<span>For human review only. ${view.target

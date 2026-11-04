@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkText, constantTimeEqual, html, NOTICE, passwordMatches, redact, risks, sanitize, untrusted } from '../src/security';
+import { checkText, constantTimeEqual, html, NOTICE, passwordMatches, postLength, redact, risks, sanitize, untrusted } from '../src/security';
 import { oauthSignature } from '../src/oauth';
 import { testEnv } from './support';
 
@@ -94,10 +94,74 @@ describe('output checks and redaction', () => {
     expect(() => checkText('sk-pri\u200bvate', env)).toThrow('secret');
     expect(() => checkText(encodeURIComponent(env.X_API_KEY), env)).toThrow('secret');
   });
-  it('checks Unicode codepoints and URLs as 23 characters', () => {
-    expect(() => checkText('\u597d'.repeat(281), testEnv())).toThrow('280');
-    expect(checkText('\u597d'.repeat(280), testEnv()).text).toHaveLength(280);
-    expect(checkText('\u597d'.repeat(257) + 'https://example.com/' + 'x?'.repeat(100), testEnv()).text).toContain('https://');
-    expect(() => checkText('\u597d'.repeat(258) + 'https://example.com/', testEnv())).toThrow('280');
+});
+
+describe('X weighted post length (twitter-text v3)', () => {
+  // Expected values match twitter-text 3.1.0 parseTweet().weightedLength for the same strings.
+  it.each([
+    ['ASCII', 'Hello, world!', 13],
+    ['Chinese', '\u4f60\u597d\u4e16\u754c', 8],
+    ['Japanese kana', '\u3053\u3093\u306b\u3061\u306f\u30ab\u30bf\u30ab\u30ca', 18],
+    ['Japanese kanji and kana', '\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8', 16],
+    ['Korean', '\uc548\ub155\ud558\uc138\uc694', 10],
+    ['Chinese and English', 'Hello \u4e16\u754c! OK', 14],
+    ['Chinese with full-width punctuation', '\u4f60\u597d\uff0c\u4e16\u754c\u3002', 12],
+    ['other scripts up to U+10FF count 1', 'caf\u00e9 \u041f\u0440\u0438\u0432\u0435\u0442 \u0645\u0631\u062d\u0628\u0627 \u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35 \u0928\u092e\u0938\u094d\u0924\u0947', 31],
+    ['curly quotes and dashes count 1', '\u201cHi\u201d \u2018there\u2019 \u2013 yes \u2014 no', 23],
+    ['primes count 1', '\u2032\u2033', 2],
+    ['ellipsis and bullet count 2', '\u2026\u2022', 4],
+    ['URL', 'Read https://example.com/a/very/long/path?with=query ok', 31],
+    ['URL between Chinese', '\u770b\u8fd9\u4e2a https://example.com/x \u597d', 33],
+    ['two URLs', 'https://a.com http://b.org/', 47],
+    ['short URL still counts 23', 'http://t.co', 23],
+    ['single emoji', '\ud83d\ude00', 2],
+    ['emoji with VS16', '\u2764\ufe0f', 2],
+    ['ZWJ family', '\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66', 2],
+    ['ZWJ profession and rainbow flag', '\ud83d\udc69\u200d\ud83d\udcbb\ud83c\udff3\ufe0f\u200d\ud83c\udf08', 4],
+    ['flag', '\ud83c\udde8\ud83c\uddf3', 2],
+    ['two flags', '\ud83c\uddef\ud83c\uddf5\ud83c\uddfa\ud83c\uddf8', 4],
+    ['subdivision flag (tag sequence)', '\ud83c\udff4\udb40\udc67\udb40\udc62\udb40\udc65\udb40\udc6e\udb40\udc67\udb40\udc7f', 2],
+    ['skin tone', '\ud83d\udc4d\ud83c\udffd', 2],
+    ['five skin tones', '\ud83d\udc4d\ud83c\udffb\ud83d\udc4d\ud83c\udffc\ud83d\udc4d\ud83c\udffd\ud83d\udc4d\ud83c\udffe\ud83d\udc4d\ud83c\udfff', 10],
+    ['keycap', '1\ufe0f\u20e3', 2],
+    ['\u00a9 is text unless VS16 makes it emoji', '\u00a9 \u00a9\ufe0f', 4],
+    ['VS15 text presentation counts per code point', '\u2764\ufe0e', 4],
+    ['combining mark after an emoji counts on its own', '\ud83d\ude00\u0301', 3],
+    ['mixed', 'Hi \u4f60\u597d \ud83d\ude00 https://example.com \u201cok\u201d', 39],
+    ['empty', '', 0],
+  ])('%s', (_name, text, expected) => { expect(postLength(text)).toBe(expected); });
+  it('counts the NFC form', () => {
+    expect(postLength('e\u0301')).toBe(1);
+    expect(postLength('\u1100\u1161')).toBe(2);
+  });
+
+  const reject = (text: string) => () => checkText(text, testEnv());
+  const tooLong = (length: number) => `Text is ${length} characters as X counts them, over the 280 limit (CJK characters and emoji count as 2, each URL as 23)`;
+  it('accepts 140 Chinese characters and rejects 141', () => {
+    expect(checkText('\u597d'.repeat(140), testEnv()).text).toBe('\u597d'.repeat(140));
+    expect(reject('\u597d'.repeat(141))).toThrow(tooLong(282));
+    // Under the old code point rule 280 Chinese characters passed.
+    expect(reject('\u597d'.repeat(280))).toThrow(tooLong(560));
+  });
+  it('accepts exactly 280 ASCII characters and rejects 281', () => {
+    const ascii = 'abc '.repeat(69) + 'abcd';
+    expect(ascii).toHaveLength(280);
+    expect(checkText(ascii, testEnv()).text).toBe(ascii);
+    expect(reject(`${ascii}!`)).toThrow(tooLong(281));
+  });
+  it('accepts exactly 280 in mixed text and rejects 281', () => {
+    // 23 + 1 + 120 * 2 + 8 * 2 = 280
+    const mixed = `https://example.com/path ${'\u597d'.repeat(120)}${'\ud83d\ude00'.repeat(8)}`;
+    expect(postLength(mixed)).toBe(280);
+    expect(checkText(mixed, testEnv()).text).toBe(mixed);
+    expect(reject(`${mixed}!`)).toThrow(tooLong(281));
+    expect(reject(`${mixed}\ud83c\uddef\ud83c\uddf5`)).toThrow(tooLong(282));
+  });
+  it('counts a long URL as 23 and checks the cleaned (NFKC) text', () => {
+    const url = `https://example.com/${'x?'.repeat(100)}`;
+    expect(checkText(`${'\u597d'.repeat(128)} ${url}`, testEnv()).text).toContain(url);
+    expect(reject(`${'\u597d'.repeat(129)} ${url}`)).toThrow(tooLong(282));
+    // Full-width Latin is NFKC-normalized to ASCII before counting, so it counts 1, not 2.
+    expect(checkText('\uff21'.repeat(10) + ' ' + 'abc '.repeat(67), testEnv()).text).toMatch(/^A{10} /);
   });
 });
