@@ -173,6 +173,7 @@ npm run dev -- --local-protocol https
 npm run typecheck
 npm test
 npm run test:smoke
+npm run test:e2e   # needs Google Chrome; set CHROME_PATH if it is not /usr/bin/google-chrome
 npx wrangler deploy --dry-run --outdir /tmp/xrg-dist
 ```
 
@@ -182,6 +183,7 @@ Vitest uses dependency injection and mocked fetch; all X calls are mocked and an
 
 `npm run test:smoke` starts an isolated local Wrangler/workerd + DO with dummy X credentials and a random `AUTH_PASSWORD`, and runs the production OAuth code: the 401 challenge, discovery metadata (including Client ID Metadata Document support), dynamic registration, wrong password, deny, and consent + PKCE token. With that token it checks initialization, six-tool listing, persisted drafts, unapproved-publish rejection, forged-signature rejection, approval without or with a wrong password (403), reject without a password, approval with the password, and old-route rejection (404). It never reads X or publishes, so it makes no X requests; temporary DO state and processes are cleaned up. Default port is 8789; override with `SMOKE_PORT`.
 
+`npm run test:e2e` drives headless Chrome (`puppeteer-core`, using the installed Chrome at `CHROME_PATH`, default `/usr/bin/google-chrome`) through the real pages on Wrangler's local dev server with the committed `wrangler.jsonc`: consent with a wrong password, **Try again**, the correct password and **Allow**, then the PKCE token; a reply draft's review page with a wrong password on **Approve**, **Try again**, and **Reject**; and a second draft approved with the password and published. Every outbound request from the Worker is intercepted: `api.x.com` is answered by a fake X API inside the script and anything else fails the test, so it never contacts X. It fails on any CSP violation, script error, horizontal overflow, or form POST whose `Origin` is not the page's own origin. It picks a free port (override with `E2E_PORT`); `E2E_SCREENSHOTS=<dir>` saves a screenshot of each step.
 
 ## Initial scope and limitations
 
