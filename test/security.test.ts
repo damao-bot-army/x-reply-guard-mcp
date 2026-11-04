@@ -98,8 +98,8 @@ describe('output checks and redaction', () => {
 });
 
 describe('X weighted post length (twitter-text v3)', () => {
-  // Expected values match twitter-text 3.1.0 parseTweet().weightedLength for the same strings. Emoji added
-  // after its twemoji table (Emoji 15 and later) are not covered.
+  // Expected values match twitter-text 3.1.0 parseTweet().weightedLength for the same strings, except the
+  // known differences below.
   it.each([
     ['ASCII', 'Hello, world!', 13],
     ['Chinese', '\u4f60\u597d\u4e16\u754c', 8],
@@ -132,6 +132,14 @@ describe('X weighted post length (twitter-text v3)', () => {
     ['mixed', 'Hi \u4f60\u597d \ud83d\ude00 https://example.com \u201cok\u201d', 39],
     ['empty', '', 0],
   ])('%s', (_name, text, expected) => { expect(postLength(text)).toBe(expected); });
+  // Known differences: emoji sequences missing from twitter-text 3.1.0's emoji table (Emoji 12 and later
+  // with a skin tone, and emoji followed by a redundant U+FE0F) count as 2 here; twitter-text counts 4.
+  it.each([
+    ['pinching hand with skin tone (Emoji 12)', '\ud83e\udd0f\ud83c\udffd'],
+    ['heart hands with skin tone (Emoji 14)', '\ud83e\udef6\ud83c\udffd'],
+    ['infinity with VS16', '\u267e\ufe0f'],
+    ['emoji with a redundant VS16', '\ud83d\ude00\ufe0f'],
+  ])('known difference: %s counts 2 (twitter-text: 4)', (_name, text) => { expect(postLength(text)).toBe(2); });
   it('counts the NFC form', () => {
     expect(postLength('e\u0301')).toBe(1);
     expect(postLength('\u1100\u1161')).toBe(2);
@@ -158,6 +166,12 @@ describe('X weighted post length (twitter-text v3)', () => {
     expect(checkText(mixed, testEnv()).text).toBe(mixed);
     expect(reject(`${mixed}!`)).toThrow(tooLong(281));
     expect(reject(`${mixed}\ud83c\uddef\ud83c\uddf5`)).toThrow(tooLong(282));
+  });
+  it('counts the text that will be posted (NFKC-cleaned), not the raw input', () => {
+    // Raw: twitter-text counts 20. Cleaned to '\u8be6\u60c5\u89c1...,\u6b22\u8fce\u8f6c\u53d1!', which counts 19.
+    const { text } = checkText('\u8be6\u60c5\u89c1\u2026\uff0c\u6b22\u8fce\u8f6c\u53d1\uff01', testEnv());
+    expect(text).toBe('\u8be6\u60c5\u89c1...,\u6b22\u8fce\u8f6c\u53d1!');
+    expect(postLength(text)).toBe(19);
   });
   it('counts a long URL as 23 and checks the cleaned (NFKC) text', () => {
     const url = `https://example.com/${'page.'.repeat(40)}html`;

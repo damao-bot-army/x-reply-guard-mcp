@@ -114,8 +114,8 @@ function textLength(text: string): number {
 
 /**
  * The length X checks against its 280 limit (twitter-text 3.1.0 rules), computed on the NFC form of the
- * text: each code point counts as 1 in the ranges U+0000-U+10FF, U+2000-U+200D, U+2010-U+201F and
- * U+2032-U+2037 and as 2 elsewhere (CJK, kana, Hangul, full-width forms); an emoji counts as 2,
+ * text (checkText passes the NFKC-cleaned text that is stored and posted): each code point counts as
+ * 1 in the ranges U+0000-U+10FF, U+2000-U+200D, U+2010-U+201F and U+2032-U+2037 and as 2 elsewhere (CJK, kana, Hangul, full-width forms); an emoji counts as 2,
  * including ZWJ sequences, skin tones, flags and keycaps; each URL counts as 23, found the way
  * twitter-text finds it (see post-urls.ts), so it ends before a CJK character, an emoji or trailing
  * punctuation, and a bare domain such as example.com is a URL too.

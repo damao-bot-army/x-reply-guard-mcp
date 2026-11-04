@@ -7,6 +7,7 @@
 // (http://www.apache.org/licenses/LICENSE-2.0). punycode.js 2.1.0 (the version in Node, which
 // twitter-text calls): Copyright Mathias Bynens, MIT License. Changes: ported to TypeScript, and the
 // punycode encoder reduced to the encoded length that the IDNA check needs.
+// Full copyright notices and license texts: THIRD_PARTY_NOTICES.md.
 
 /** One URL as twitter-text reports it: the text it counts as a URL, and where that text starts (UTF-16). */
 export interface UrlEntity { url: string; start: number }
@@ -208,6 +209,8 @@ export function extractUrls(text: string): UrlEntity[] {
   return urls;
 }
 
+// twitter-text also adds the punycode length difference of the domain here, but its toAscii returns the
+// domain unchanged, so that difference is always 0 and is left out.
 function isValidUrl(url: string, protocol: string, domain: string): boolean {
   return idnaValid(domain) && protocol.length + url.length <= MAX_URL_LENGTH;
 }

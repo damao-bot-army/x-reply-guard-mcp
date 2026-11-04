@@ -187,7 +187,7 @@ Vitest uses dependency injection and mocked fetch; all X calls are mocked and an
 
 ## Initial scope and limitations
 
-- Static risk heuristics can be conservative (e.g. ordinary technical discussion mentioning "token", or long English/base64-like strings). They are not semantic moderation. The length check follows twitter-text 3.1.0, including where URLs start and end; emoji newer than its emoji table (Emoji 15 and later) may count differently. Zero-width joiners are stripped from drafts as hidden characters, so a ZWJ emoji such as the family or rainbow-flag emoji is stored, counted and published as its separate emoji. X ultimately determines acceptance.
+- Static risk heuristics can be conservative (e.g. ordinary technical discussion mentioning "token", or long English/base64-like strings). They are not semantic moderation. The length check follows twitter-text 3.1.0, including where URLs start and end; emoji sequences missing from its emoji table (Emoji 12 and later with a skin tone, such as 🤏🏽, and emoji followed by a redundant U+FE0F, such as ♾️ or 😀️) count as 2 here where twitter-text counts 4. Like twitter-text, counting is quadratic on some pathological inputs (about 1–2 s for 10,000 characters such as `中.` repeated). Zero-width joiners are stripped from drafts as hidden characters, so a ZWJ emoji such as the family or rainbow-flag emoji is stored, counted and published as its separate emoji. X ultimately determines acceptance.
 - Text only, one account. No multi-user OAuth, images, thread orchestration, background scheduling, SSE push, or approval notifications. `get_mentions` accepts `since_id` / `max_results` but no pagination token; callers may save `newest_id` for incremental reads.
 - Browser approval requires HTTPS and a trusted browser. A signed link lets its holder view the draft and reject it; approving also requires `AUTH_PASSWORD`.
 - Unknown send outcomes retain reservations and may consume quota without a successful post. This explicitly favors avoiding duplicates over automatic recovery. Credential cleanup/rotation, mode changes, and long-term audit archival are operational responsibilities.
@@ -195,4 +195,9 @@ Vitest uses dependency injection and mocked fetch; all X calls are mocked and an
 
 ## License
 
-[MIT](LICENSE). `src/post-urls.ts` is ported from [twitter-text](https://github.com/twitter/twitter-text) 3.1.0 (Copyright 2018 Twitter, Inc., Apache License 2.0).
+[MIT](LICENSE). `src/post-urls.ts` includes code ported from:
+
+- [twitter-text](https://github.com/twitter/twitter-text) 3.1.0 — Copyright Twitter, Inc., Apache License 2.0.
+- [punycode.js](https://github.com/mathiasbynens/punycode.js) — Copyright Mathias Bynens, MIT License.
+
+Their copyright notices and full license texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
