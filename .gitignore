@@ -2,6 +2,8 @@ node_modules/
 .dev.vars
 .dev.vars.*
 !.dev.vars.example
+wrangler.local.*
+!wrangler.local.jsonc.example
 .wrangler/
 dist/
 coverage/

@@ -34,12 +34,17 @@ export async function constantTimeEqual(a: string, b: string): Promise<boolean> 
   for (let i = 0; i < aa.length; i++) diff |= aa.charCodeAt(i) ^ bb.charCodeAt(i);
   return diff === 0;
 }
+/** An empty submission or an unset AUTH_PASSWORD never matches. */
+export async function passwordMatches(actual: string, expected: string): Promise<boolean> {
+  if (!expected || !actual) return false;
+  return constantTimeEqual(actual, expected);
+}
 export async function hmac(secret: string, value: string, algorithm = 'SHA-256'): Promise<string> {
   const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: algorithm }, false, ['sign']);
   return btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(value)))));
 }
 export function secrets(env: Env): string[] {
-  return [env.MCP_BEARER_TOKEN, env.APPROVAL_SECRET, env.X_API_KEY, env.X_API_SECRET, env.X_ACCESS_TOKEN, env.X_ACCESS_TOKEN_SECRET].filter(Boolean).sort((a, b) => b.length - a.length);
+  return [env.AUTH_PASSWORD, env.APPROVAL_SECRET, env.X_API_KEY, env.X_API_SECRET, env.X_ACCESS_TOKEN, env.X_ACCESS_TOKEN_SECRET].filter(Boolean).sort((a, b) => b.length - a.length);
 }
 export function redact(text: string, env: Env): string {
   const variants = new Set(secrets(env).flatMap(secret => [secret, normalize(secret), sanitize(secret, 10000)]

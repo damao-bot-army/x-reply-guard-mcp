@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkText, constantTimeEqual, html, NOTICE, redact, risks, sanitize, untrusted } from '../src/security';
+import { checkText, constantTimeEqual, html, NOTICE, passwordMatches, redact, risks, sanitize, untrusted } from '../src/security';
 import { oauthSignature } from '../src/oauth';
 import { testEnv } from './support';
 
@@ -62,9 +62,16 @@ describe('output checks and redaction', () => {
     expect(await constantTimeEqual('abc', 'abc')).toBe(true);
     expect(await constantTimeEqual('abc', 'abcd')).toBe(false);
   });
+  it('password check never matches an empty password or an unset AUTH_PASSWORD', async () => {
+    expect(await passwordMatches('owner-password', 'owner-password')).toBe(true);
+    expect(await passwordMatches('owner-passwor', 'owner-password')).toBe(false);
+    expect(await passwordMatches('', '')).toBe(false);
+    expect(await passwordMatches('anything', '')).toBe(false);
+    expect(await passwordMatches('', 'owner-password')).toBe(false);
+  });
   it('redacts every configured credential and JSON/URL escaped variants', () => {
     const env = testEnv(); env.X_API_SECRET = 'quote"slash\\special';
-    const values = [env.MCP_BEARER_TOKEN, env.APPROVAL_SECRET, env.X_API_KEY, env.X_API_SECRET, env.X_ACCESS_TOKEN, env.X_ACCESS_TOKEN_SECRET];
+    const values = [env.AUTH_PASSWORD, env.APPROVAL_SECRET, env.X_API_KEY, env.X_API_SECRET, env.X_ACCESS_TOKEN, env.X_ACCESS_TOKEN_SECRET];
     for (const s of values) {
       const output = redact(`oops ${s} ${encodeURIComponent(s)} ${JSON.stringify(s)} ${html(s)}`, env);
       expect(output).not.toContain(s);
