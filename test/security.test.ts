@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { checkText, constantTimeEqual, html, NOTICE, passwordMatches, redact, risks, sanitize, untrusted } from '../src/security';
+import { checkText, constantTimeEqual, html, NOTICE, passwordMatches, postLength, redact, risks, sanitize, untrusted } from '../src/security';
 import { oauthSignature } from '../src/oauth';
+import { extractUrls } from '../src/post-urls';
 import { testEnv } from './support';
 
 describe('OAuth 1.0a official vectors', () => {
@@ -94,10 +95,146 @@ describe('output checks and redaction', () => {
     expect(() => checkText('sk-pri\u200bvate', env)).toThrow('secret');
     expect(() => checkText(encodeURIComponent(env.X_API_KEY), env)).toThrow('secret');
   });
-  it('checks Unicode codepoints and URLs as 23 characters', () => {
-    expect(() => checkText('\u597d'.repeat(281), testEnv())).toThrow('280');
-    expect(checkText('\u597d'.repeat(280), testEnv()).text).toHaveLength(280);
-    expect(checkText('\u597d'.repeat(257) + 'https://example.com/' + 'x?'.repeat(100), testEnv()).text).toContain('https://');
-    expect(() => checkText('\u597d'.repeat(258) + 'https://example.com/', testEnv())).toThrow('280');
+});
+
+describe('X weighted post length (twitter-text v3)', () => {
+  // Expected values match twitter-text 3.1.0 parseTweet().weightedLength for the same strings, except the
+  // known differences below.
+  it.each([
+    ['ASCII', 'Hello, world!', 13],
+    ['Chinese', '\u4f60\u597d\u4e16\u754c', 8],
+    ['Japanese kana', '\u3053\u3093\u306b\u3061\u306f\u30ab\u30bf\u30ab\u30ca', 18],
+    ['Japanese kanji and kana', '\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8', 16],
+    ['Korean', '\uc548\ub155\ud558\uc138\uc694', 10],
+    ['Chinese and English', 'Hello \u4e16\u754c! OK', 14],
+    ['Chinese with full-width punctuation', '\u4f60\u597d\uff0c\u4e16\u754c\u3002', 12],
+    ['other scripts up to U+10FF count 1', 'caf\u00e9 \u041f\u0440\u0438\u0432\u0435\u0442 \u0645\u0631\u062d\u0628\u0627 \u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35 \u0928\u092e\u0938\u094d\u0924\u0947', 31],
+    ['curly quotes and dashes count 1', '\u201cHi\u201d \u2018there\u2019 \u2013 yes \u2014 no', 23],
+    ['primes count 1', '\u2032\u2033', 2],
+    ['ellipsis and bullet count 2', '\u2026\u2022', 4],
+    ['URL', 'Read https://example.com/a/very/long/path?with=query ok', 31],
+    ['URL between Chinese', '\u770b\u8fd9\u4e2a https://example.com/x \u597d', 33],
+    ['two URLs', 'https://a.com http://b.org/', 47],
+    ['short URL still counts 23', 'http://t.co', 23],
+    ['single emoji', '\ud83d\ude00', 2],
+    ['emoji with VS16', '\u2764\ufe0f', 2],
+    ['ZWJ family', '\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66', 2],
+    ['ZWJ profession and rainbow flag', '\ud83d\udc69\u200d\ud83d\udcbb\ud83c\udff3\ufe0f\u200d\ud83c\udf08', 4],
+    ['flag', '\ud83c\udde8\ud83c\uddf3', 2],
+    ['two flags', '\ud83c\uddef\ud83c\uddf5\ud83c\uddfa\ud83c\uddf8', 4],
+    ['subdivision flag (tag sequence)', '\ud83c\udff4\udb40\udc67\udb40\udc62\udb40\udc65\udb40\udc6e\udb40\udc67\udb40\udc7f', 2],
+    ['skin tone', '\ud83d\udc4d\ud83c\udffd', 2],
+    ['five skin tones', '\ud83d\udc4d\ud83c\udffb\ud83d\udc4d\ud83c\udffc\ud83d\udc4d\ud83c\udffd\ud83d\udc4d\ud83c\udffe\ud83d\udc4d\ud83c\udfff', 10],
+    ['keycap', '1\ufe0f\u20e3', 2],
+    ['\u00a9 is text unless VS16 makes it emoji', '\u00a9 \u00a9\ufe0f', 4],
+    ['VS15 text presentation counts per code point', '\u2764\ufe0e', 4],
+    ['combining mark after an emoji counts on its own', '\ud83d\ude00\u0301', 3],
+    ['mixed', 'Hi \u4f60\u597d \ud83d\ude00 https://example.com \u201cok\u201d', 39],
+    ['empty', '', 0],
+  ])('%s', (_name, text, expected) => { expect(postLength(text)).toBe(expected); });
+  // Known differences: emoji sequences missing from twitter-text 3.1.0's emoji table (Emoji 12 and later
+  // with a skin tone, and emoji followed by a redundant U+FE0F) count as 2 here; twitter-text counts 4.
+  it.each([
+    ['pinching hand with skin tone (Emoji 12)', '\ud83e\udd0f\ud83c\udffd'],
+    ['heart hands with skin tone (Emoji 14)', '\ud83e\udef6\ud83c\udffd'],
+    ['infinity with VS16', '\u267e\ufe0f'],
+    ['emoji with a redundant VS16', '\ud83d\ude00\ufe0f'],
+  ])('known difference: %s counts 2 (twitter-text: 4)', (_name, text) => { expect(postLength(text)).toBe(2); });
+  it('counts the NFC form', () => {
+    expect(postLength('e\u0301')).toBe(1);
+    expect(postLength('\u1100\u1161')).toBe(2);
+  });
+
+  const reject = (text: string) => () => checkText(text, testEnv());
+  const tooLong = (length: number) => `Text is ${length} characters as X counts them, over the 280 limit (CJK characters and emoji count as 2, each URL as 23)`;
+  it('accepts 140 Chinese characters and rejects 141', () => {
+    expect(checkText('\u597d'.repeat(140), testEnv()).text).toBe('\u597d'.repeat(140));
+    expect(reject('\u597d'.repeat(141))).toThrow(tooLong(282));
+    // Under the old code point rule 280 Chinese characters passed.
+    expect(reject('\u597d'.repeat(280))).toThrow(tooLong(560));
+  });
+  it('accepts exactly 280 ASCII characters and rejects 281', () => {
+    const ascii = 'abc '.repeat(69) + 'abcd';
+    expect(ascii).toHaveLength(280);
+    expect(checkText(ascii, testEnv()).text).toBe(ascii);
+    expect(reject(`${ascii}!`)).toThrow(tooLong(281));
+  });
+  it('accepts exactly 280 in mixed text and rejects 281', () => {
+    // 23 + 1 + 120 * 2 + 8 * 2 = 280
+    const mixed = `https://example.com/path ${'\u597d'.repeat(120)}${'\ud83d\ude00'.repeat(8)}`;
+    expect(postLength(mixed)).toBe(280);
+    expect(checkText(mixed, testEnv()).text).toBe(mixed);
+    expect(reject(`${mixed}!`)).toThrow(tooLong(281));
+    expect(reject(`${mixed}\ud83c\uddef\ud83c\uddf5`)).toThrow(tooLong(282));
+  });
+  it('counts the text that will be posted (NFKC-cleaned), not the raw input', () => {
+    // Raw: twitter-text counts 20. Cleaned to '\u8be6\u60c5\u89c1...,\u6b22\u8fce\u8f6c\u53d1!', which counts 19.
+    const { text } = checkText('\u8be6\u60c5\u89c1\u2026\uff0c\u6b22\u8fce\u8f6c\u53d1\uff01', testEnv());
+    expect(text).toBe('\u8be6\u60c5\u89c1...,\u6b22\u8fce\u8f6c\u53d1!');
+    expect(postLength(text)).toBe(19);
+  });
+  it('counts a long URL as 23 and checks the cleaned (NFKC) text', () => {
+    const url = `https://example.com/${'page.'.repeat(40)}html`;
+    expect(checkText(`${'\u597d'.repeat(128)} ${url}`, testEnv()).text).toContain(url);
+    expect(reject(`${'\u597d'.repeat(129)} ${url}`)).toThrow(tooLong(282));
+    // Full-width Latin is NFKC-normalized to ASCII before counting, so it counts 1, not 2.
+    expect(checkText('\uff21'.repeat(10) + ' ' + 'abc '.repeat(67), testEnv()).text).toMatch(/^A{10} /);
+  });
+});
+
+describe('URLs as twitter-text 3.1.0 finds them', () => {
+  // Expected values are twitter-text 3.1.0 parseTweet().weightedLength and extractUrls() for the same strings.
+  it.each([
+    // A URL ends at the first character that cannot continue it, and trailing punctuation is left out.
+    ['URL followed by 200 Chinese characters', `https://a.co/${'\u4e2d'.repeat(200)}`, 423],
+    ['URL followed by 200 emoji', `see https://example.com/${'\ud83d\ude00'.repeat(200)}`, 427],
+    ['URL between Chinese text and punctuation', '\u8be6\u60c5\u89c1https://example.com/abc\uff0c\u6b22\u8fce\u8f6c\u53d1\uff01', 41],
+    ['URL in parentheses', '(https://example.com)', 25],
+    ['URL before a full stop', 'https://example.com.', 24],
+    ['URL in corner brackets', '\u300chttps://example.com\u300d', 27],
+    ['trailing ! and . after a path and a query', 'https://example.com/path! https://example.com?a=1&b=2.', 49],
+    ['balanced parentheses stay in the path', 'https://en.wikipedia.org/wiki/Foo_(bar)', 23],
+    ['accented Latin stays in the path', 'https://example.com/caf\u00e9', 23],
+    ['internationalized domain, path ends at CJK', 'https://\u4f8b\u5b50.\u4e2d\u56fd/\u8def\u5f84', 27],
+    ['t.co keeps only its slug', 'http://t.co/abc/def', 27],
+    // A bare domain with a known top-level domain is a URL too.
+    ['bare domain', 'visit example.com now', 33],
+    ['file name with a country-code TLD', 'run main.py', 27],
+    ['bare domain followed by an emoji', 'example.com\ud83d\ude00', 25],
+    ['no TLD, version numbers', 'node.js and v2.4.1.', 19],
+    ['e-mail address and mention are not URLs', 'user@example.com @example.com', 29],
+    // Not URLs at all: counted character by character.
+    ['no TLD', 'https://localhost/x', 19],
+    ['IP address', 'https://192.168.1.1/x', 21],
+    ['protocol glued to a word', 'xhttps://example.com', 20],
+    ['domain label over 63 characters', `https://${'a'.repeat(64)}.com`, 76],
+    ['domain label of 63 characters', `https://${'a'.repeat(63)}.com`, 23],
+    ['URL over 4096 characters', `https://example.com/${'a'.repeat(4100)}`, 4120],
+  ])('%s', (_name, text, expected) => { expect(postLength(text)).toBe(expected); });
+
+  it('finds the same URLs', () => {
+    const urls = (text: string) => extractUrls(text).map(({ url }) => url);
+    expect(urls(`https://a.co/${'\u4e2d'.repeat(3)}`)).toEqual(['https://a.co/']);
+    expect(urls('\u8be6\u60c5\u89c1https://example.com/abc\uff0c')).toEqual(['https://example.com/abc']);
+    expect(urls('(https://example.com) https://example.com.')).toEqual(['https://example.com', 'https://example.com']);
+    expect(urls('see example.com, main.py and http://t.co/abc/def')).toEqual(['example.com', 'main.py', 'http://t.co/abc']);
+    expect(urls('https://localhost/x node.js v2.4.1')).toEqual([]);
+  });
+
+  const reject = (text: string) => () => checkText(text, testEnv());
+  it('rejects text that X rejects even when it follows a URL', () => {
+    expect(reject(`https://a.co/${'\u4e2d'.repeat(200)}`)).toThrow('Text is 423 characters');
+    expect(reject(`see https://example.com/${'\ud83d\ude00'.repeat(200)}`)).toThrow('Text is 427 characters');
+  });
+  it('accepts a URL glued to Chinese text up to 280 and rejects 281', () => {
+    // As typed: 2 + 23 + 2 (full-width comma) + 126 * 2 = 279, and 127 make 281.
+    const prefix = '\u89c1https://example.com/a\uff0c';
+    expect(postLength(prefix + '\u4e2d'.repeat(126))).toBe(279);
+    expect(postLength(prefix + '\u4e2d'.repeat(127))).toBe(281);
+    // checkText() counts the text that is posted, where NFKC has made the comma ASCII (1): 127 make 280.
+    const posted = '\u89c1https://example.com/a,';
+    expect(checkText(prefix + '\u4e2d'.repeat(127), testEnv()).text).toBe(posted + '\u4e2d'.repeat(127));
+    expect(reject(prefix + '\u4e2d'.repeat(128))).toThrow('Text is 282 characters');
+    expect(reject(prefix + '\u4e2d'.repeat(129))).toThrow('Text is 284 characters');
   });
 });
