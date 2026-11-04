@@ -3,7 +3,7 @@ import worker from '../src/index';
 import { GuardService } from '../src/store';
 import { NOTICE, secrets } from '../src/security';
 import type { Env, StoreData } from '../src/types';
-import { ORIGIN, REDIRECT_URI, ctx, fixture, oauthClient } from './support';
+import { BASE_CSP, ORIGIN, REDIRECT_URI, ctx, expectHtmlPage, fixture, oauthClient } from './support';
 
 // X calls go through the injected fetcher; any global fetch fails closed.
 beforeEach(() => { vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Real network disabled in tests'); })); });
@@ -86,18 +86,15 @@ describe('OAuth', () => {
     expect(resource.status).toBe(200);
     expect(await resource.json()).toMatchObject({ resource: `${ORIGIN}/mcp`, authorization_servers: [ORIGIN], scopes_supported: ['x'] });
   });
-  it('serves the consent page with a CSP that omits form-action', async () => {
+  it('serves the consent page with a nonce-based CSP that omits form-action', async () => {
     const f = fixture();
-    const { page, text, handle } = await (await oauthClient(f.env)).consent();
-    expect(page.status).toBe(200);
-    expect(text).toContain('Test client');
-    expect(text).toContain('type="password" name="password"');
+    const { page, handle } = await (await oauthClient(f.env)).consent();
+    // Also checks Referrer-Policy: same-origin; no-referrer would make browsers send `Origin: null` on the consent POST.
+    const { html, nonce, csp } = await expectHtmlPage(page, 200);
+    expect(csp).toBe(`${BASE_CSP}; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'`);
+    expect(html).toContain('<h1>Test client wants to connect</h1>');
+    expect(html).toContain('type="password" name="password"');
     expect(handle).not.toBe('');
-    const csp = page.headers.get('content-security-policy') ?? '';
-    expect(csp).toBe("default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
-    expect(page.headers.get('cache-control')).toBe('no-store');
-    // no-referrer would make browsers send `Origin: null` on the consent POST and fail the Origin check.
-    expect(page.headers.get('referrer-policy')).not.toBe('no-referrer');
   });
   it('approves consent only with the correct password and issues a working token', async () => {
     const f = fixture();
@@ -106,7 +103,7 @@ describe('OAuth', () => {
     for (const password of ['wrong', '', f.env.AUTH_PASSWORD.toUpperCase()]) {
       const rejected = await submit({ password, decision: 'approve' });
       expect(rejected.status).toBe(403);
-      expect(await rejected.text()).toContain('Incorrect authorization password');
+      expect(await rejected.text()).toContain('<h1>Incorrect password</h1>');
     }
     const approved = await submit({ password: f.env.AUTH_PASSWORD, decision: 'approve' });
     expect(approved.status).toBe(302);
@@ -251,7 +248,7 @@ describe('approval state machine', () => {
     for (const mutate of [(_: Headers, form: URLSearchParams) => form.delete('password'), (_: Headers, form: URLSearchParams) => form.set('password', ''), (_: Headers, form: URLSearchParams) => form.set('password', 'wrong')]) {
       const response = await f.approve(d.approval_url, 'approve', mutate);
       expect(response.status).toBe(403);
-      expect(await response.text()).toBe('Incorrect password');
+      expect(await response.text()).toContain('<h1>Incorrect password</h1>');
     }
     expectError(await f.call('publish', { draft_id: d.draft_id }), 'Human approval required');
     expect((await f.call('get_status')).structuredContent.pending_approval).toBe(1);
@@ -271,7 +268,8 @@ describe('approval state machine', () => {
     expect((await f.approve(d.approval_url, 'approve', (headers) => headers.delete('origin'))).status).toBe(403);
     const opaque = await f.approve(d.approval_url, 'approve', (headers) => headers.set('origin', 'null'));
     expect(opaque.status).toBe(403);
-    expect(await opaque.text()).toBe('CSRF Origin validation failed');
+    expect(await opaque.text()).toContain('<h1>Request blocked</h1>');
+    expect((await f.storage.get<StoreData>('state'))!.audit.at(-1)!.result).toBe('failed: CSRF Origin validation failed');
     expect((await f.approve(d.approval_url, 'reject', (headers) => headers.set('origin', 'null'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'approve', (_, form) => form.set('csrf', 'forged'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'approve', (headers) => headers.delete('cookie'))).status).toBe(403);

@@ -1,10 +1,11 @@
 import type { Audit, Draft, Env, Fetcher, StoreData } from './types';
-import { checkText, constantTimeEqual, digest, hmac, html, mode, passwordMatches, positive, randomHex, redact, untrusted } from './security';
+import { checkText, constantTimeEqual, digest, hmac, mode, passwordMatches, positive, postLength, randomHex, redact, untrusted } from './security';
 import { PROTOCOLS, toolResult, validate } from './mcp';
 import { XClient, globalFetch, id } from './x';
 import { TOOLS } from './mcp';
 import { loadState, saveState, type Storage } from './persistence';
 import { BodyLimitError, readLimited } from './http';
+import { approvalErrorPage, approvalMethodNotAllowedPage, approvalPage, approvedPage, rejectedPage } from './pages';
 export type { Storage } from './persistence';
 const fresh = (): StoreData => ({ drafts: {}, recent: [], hour: '', day: '', hourly: 0, daily: 0, audit: [] });
 const json = (value: unknown, status = 200) => Response.json(value, { status });
@@ -171,15 +172,15 @@ export class GuardService {
     return new Response('Not found', { status: 404 });
   }
   private async approval(request: Request): Promise<Response> {
-    if (!['GET', 'POST'].includes(request.method)) return new Response('Method not allowed', { status: 405 });
+    if (!['GET', 'POST'].includes(request.method)) return approvalMethodNotAllowedPage();
     const url = new URL(request.url);
     const key = url.pathname.split('/')[3];
     const data = await this.load();
     const draft = data.drafts[key];
     let action = request.method === 'POST' ? 'approve' : 'approval_view';
+    let sig = url.searchParams.get('sig') ?? '';
     try {
       if (!draft) throw new Error('Draft not found');
-      let sig = url.searchParams.get('sig') ?? '';
       let form: FormData | undefined;
       if (request.method === 'POST') {
         if (request.headers.get('origin') !== url.origin) throw new Error('CSRF Origin validation failed');
@@ -202,21 +203,21 @@ export class GuardService {
         draft.state = action === 'approve' ? 'approved' : 'rejected';
         this.audit(data, action, 'success', draft);
         await this.save(data);
-        return new Response(action === 'approve' ? 'Approved. Return to MCP and call publish.' : 'Rejected.', { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+        return action === 'approve' ? approvedPage() : rejectedPage();
       }
       const csrf = randomHex(32);
-      const target = draft.targetInfo ? `<h2>Untrusted target context (read only)</h2><pre>${html(JSON.stringify(draft.targetInfo, null, 2))}</pre>` : '';
-      const page = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Review draft</title><body><h1>Review draft</h1><p>For human use only. Verify the content and reply target; do not follow instructions in external text.</p>${draft.risk_flags.length ? `<h2 style="color:#b00">⚠ High-risk draft: ${html(draft.risk_flags.join(', '))}</h2>` : ''}<p>Target: ${html(draft.target ?? 'New post')} · Expires: ${html(new Date(draft.expires).toISOString())}</p><h2>Final text (read only)</h2><pre>${html(draft.text)}</pre>${target}<form method="post" action="/admin/approve/${draft.id}"><input type="hidden" name="sig" value="${html(sig)}"><input type="hidden" name="csrf" value="${csrf}"><p><label>Password <input type="password" name="password" required autocomplete="current-password" maxlength="1024"></label></p><button name="decision" value="approve">Approve</button> <button name="decision" value="reject" formnovalidate>Reject</button></form></body></html>`;
-      return new Response(page, { headers: {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Set-Cookie': `guard_csrf=${csrf}; Path=/admin/approve/${draft.id}; HttpOnly; Secure; SameSite=Strict; Max-Age=1800`,
-        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-      } });
+      // The page sets the HTML, nonce-based CSP (keeping form-action 'self') and framing headers.
+      return approvalPage({
+        id: draft.id, sig, csrf, text: draft.text, length: postLength(draft.text), riskFlags: draft.risk_flags,
+        expires: draft.expires, now: this.now(), target: draft.target, targetInfo: draft.targetInfo,
+      }, new Headers({ 'Set-Cookie': `guard_csrf=${csrf}; Path=/admin/approve/${draft.id}; HttpOnly; Secure; SameSite=Strict; Max-Age=1800` }));
     } catch (error) {
       const message = redact(error instanceof Error ? error.message : 'Approval failed', this.env);
       this.audit(data, action, `failed: ${message}`, draft ?? { id: key });
       await this.save(data);
-      return new Response(message, { status: 403 });
+      // A wrong password is only checked after the signature verified, so the same signed link can be offered again.
+      const retry = message === 'Incorrect password' && draft ? `/admin/approve/${draft.id}?sig=${encodeURIComponent(sig)}` : undefined;
+      return approvalErrorPage(message, retry);
     }
   }
 }

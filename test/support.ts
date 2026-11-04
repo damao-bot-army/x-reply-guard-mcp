@@ -1,4 +1,4 @@
-import { vi } from 'vitest';
+import { expect, vi } from 'vitest';
 import worker from '../src/index';
 import { GuardService, type Storage } from '../src/store';
 import type { Env, Fetcher } from '../src/types';
@@ -33,6 +33,44 @@ export function testEnv(): Env {
     GUARD_STORE: {} as DurableObjectNamespace,
     OAUTH_KV: memoryKv(),
   } as Env;
+}
+
+export const BASE_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
+
+/**
+ * Checks the headers every HTML page shares, that the inline stylesheet and scripts carry the CSP
+ * nonce, and that no markup could load or run anything else. Only the approval page keeps its
+ * original form-action 'self'; /authorize must not have form-action at all.
+ */
+export async function expectHtmlPage(response: Response, status: number, { formAction = false } = {}) {
+  expect(response.status).toBe(status);
+  expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  // no-referrer would make browsers send `Origin: null` on same-origin form POSTs.
+  expect(response.headers.get('referrer-policy')).toBe('same-origin');
+  expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+  expect(response.headers.get('x-frame-options')).toBe('DENY');
+  const csp = response.headers.get('content-security-policy') ?? '';
+  expect(csp.startsWith(`${BASE_CSP}; `)).toBe(true);
+  expect(csp).not.toMatch(/unsafe-inline|unsafe-eval|unsafe-hashes|strict-dynamic|\*/);
+  if (formAction) expect(csp.endsWith("; form-action 'self'")).toBe(true);
+  else expect(csp).not.toContain('form-action');
+  const nonce = /style-src 'nonce-([A-Za-z0-9+/]{24})'/.exec(csp)?.[1];
+  expect(nonce).toBeDefined();
+  const html = await response.text();
+  expect(html.startsWith('<!doctype html>')).toBe(true);
+  expect(html.match(/<style\b[^>]*>/g)).toEqual([`<style nonce="${nonce}">`]);
+  const scripts = html.match(/<script\b[^>]*>/g) ?? [];
+  expect(scripts.every(tag => tag === `<script nonce="${nonce}">`)).toBe(true);
+  expect(csp.includes(`script-src 'nonce-${nonce}'`)).toBe(scripts.length > 0);
+  // Every real tag (escaped text never starts with `<`): no inline styles or handlers, nothing loaded
+  // from elsewhere, and links only to this origin.
+  for (const tag of html.match(/<[a-z][^>]*>/gi) ?? []) {
+    expect(tag).not.toMatch(/\s(?:style|on[a-z]+|src|srcset|formaction)=/i);
+    expect(tag).not.toMatch(/\s(?:href|action)="(?!\/[a-z])/i);
+  }
+  expect(html).not.toMatch(/@import|url\((?!#)/);
+  return { html, nonce: nonce!, csp };
 }
 
 const base64url = (bytes: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
