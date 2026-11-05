@@ -45,8 +45,13 @@ export async function hmac(secret: string, value: string, algorithm = 'SHA-256')
   const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: algorithm }, false, ['sign']);
   return btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(value)))));
 }
+/** The six credentials every request needs; the Worker refuses to serve until all are set. */
+export function requiredSecrets(env: Env): string[] {
+  return [env.AUTH_PASSWORD, env.APPROVAL_SECRET, env.X_API_KEY, env.X_API_SECRET, env.X_ACCESS_TOKEN, env.X_ACCESS_TOKEN_SECRET].filter(Boolean);
+}
+/** Every configured secret, longest first: what redact() removes and checkText() refuses. */
 export function secrets(env: Env): string[] {
-  return [env.AUTH_PASSWORD, env.APPROVAL_SECRET, env.X_API_KEY, env.X_API_SECRET, env.X_ACCESS_TOKEN, env.X_ACCESS_TOKEN_SECRET].filter(Boolean).sort((a, b) => b.length - a.length);
+  return [env.AUTH_PASSWORD, env.APPROVAL_SECRET, env.X_API_KEY, env.X_API_SECRET, env.X_ACCESS_TOKEN, env.X_ACCESS_TOKEN_SECRET, env.ECHO_WAKE_TOKEN].filter((s): s is string => !!s).sort((a, b) => b.length - a.length);
 }
 export function redact(text: string, env: Env): string {
   const variants = new Set(secrets(env).flatMap(secret => [secret, normalize(secret), sanitize(secret, 10000)]

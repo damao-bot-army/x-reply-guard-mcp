@@ -1,5 +1,6 @@
 // Real local workerd/DO smoke test with dummy X credentials and the production OAuth code (no auth bypass).
-// It never calls an X read tool or publishes a draft, so it makes no X requests. No Cloudflare account is required.
+// It never calls an X read tool or clicks Approve (which would publish), so it makes no X requests. No Cloudflare account is required.
+// Review pages use the local Cloudflare Access test double (ACCESS_TEST_DOUBLE=true + X-Test-Access-Identity on 127.0.0.1).
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -16,8 +17,9 @@ const vars = {
   AUTH_PASSWORD: password, APPROVAL_SECRET: 'smoke-only-approval-dummy',
   X_API_KEY: 'smoke-only-api-key-dummy', X_API_SECRET: 'smoke-only-api-secret-dummy',
   X_ACCESS_TOKEN: 'smoke-only-access-dummy', X_ACCESS_TOKEN_SECRET: 'smoke-only-token-secret-dummy',
-  PUBLISH_MODE: 'approval',
+  PUBLISH_MODE: 'approval', ACCESS_TEST_DOUBLE: 'true',
 };
+const reviewer = { 'X-Test-Access-Identity': 'smoke-reviewer@example.com' };
 const args = ['node_modules/wrangler/bin/wrangler.js', 'dev', '--local', '--ip', '127.0.0.1', '--port', port, '--inspector-port', '0', '--persist-to', dir];
 for (const [key, value] of Object.entries(vars)) args.push('--var', `${key}:${value}`);
 const child = spawn(process.execPath, args, {
@@ -53,17 +55,17 @@ function assertNonce(response, html, suffix = '') {
   assert.ok(html.includes(`<style nonce="${nonce[1]}">`) && html.includes(`<script nonce="${nonce[1]}">`), 'Nonce mismatch between CSP and page');
 }
 async function approvalForm(url) {
-  const page = await fetch(url);
+  const page = await fetch(url, { headers: reviewer });
   assert.equal(page.status, 200);
   // no-referrer would make real browsers send `Origin: null` on the form POST below.
   assert.equal(page.headers.get('referrer-policy'), 'same-origin');
   const html = await page.text();
   assertNonce(page, html, "; form-action 'self'");
-  assert.match(html, /type="password" name="password"/);
+  assert.doesNotMatch(html, /name="password"/);
   const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
   assert.ok(csrf, 'Missing CSRF token');
   return (fields) => fetch(url.split('?')[0], {
-    method: 'POST', headers: { Origin: base, Cookie: cookies(page), 'Content-Type': 'application/x-www-form-urlencoded' },
+    method: 'POST', headers: { ...reviewer, Origin: base, Cookie: cookies(page), 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ sig: new URL(url).searchParams.get('sig'), csrf, ...fields }),
   });
 }
@@ -142,34 +144,28 @@ try {
   assert.deepEqual(tools.map(t => t.name), ['get_mentions', 'get_post', 'draft_post', 'draft_reply', 'publish', 'get_status']);
   console.log('MCP: initialize OK, tools/list: ' + tools.map(t => t.name).join(', '));
 
-  // Approval form: approve needs AUTH_PASSWORD, reject does not.
+  // Review page: Cloudflare Access (test double) required, no password field, Reject sends the draft back.
   const first = (await rpc('tools/call', { name: 'draft_post', arguments: { text: 'Local smoke draft only. No X request.' } })).structuredContent;
   const blocked = await rpc('tools/call', { name: 'publish', arguments: { draft_id: first.draft_id } });
   assert.ok(blocked.isError);
   assert.match(blocked.content[0].text, /Human approval required/);
   assert.equal(new URL(first.approval_url).pathname, `/admin/approve/${first.draft_id}`);
-  assert.equal((await fetch(first.approval_url.replace(/sig=.*/, 'sig=forged'))).status, 403);
+  const anonymous = await fetch(first.approval_url);
+  assert.equal(anonymous.status, 403);
+  assert.match(await anonymous.text(), /<h1>Sign-in required<\/h1>/);
+  assert.equal((await fetch(first.approval_url.replace(/sig=.*/, 'sig=forged'), { headers: reviewer })).status, 403);
   const decide = await approvalForm(first.approval_url);
-  for (const fields of [{ decision: 'approve' }, { decision: 'approve', password: 'wrong-password' }]) {
-    const response = await decide(fields);
-    assert.equal(response.status, 403);
-    assert.match(await response.text(), /<h1>Incorrect password<\/h1>/);
-  }
-  assert.match((await rpc('tools/call', { name: 'publish', arguments: { draft_id: first.draft_id } })).content[0].text, /Human approval required/);
   const rejected = await decide({ decision: 'reject' });
   assert.equal(rejected.status, 200);
   assert.match(await rejected.text(), /<h1>Rejected<\/h1>/);
   assert.match((await rpc('tools/call', { name: 'publish', arguments: { draft_id: first.draft_id } })).content[0].text, /was rejected/);
-  const second = (await rpc('tools/call', { name: 'draft_post', arguments: { text: 'Second local smoke draft.' } })).structuredContent;
-  const approvedDraft = await (await approvalForm(second.approval_url))({ decision: 'approve', password });
-  assert.equal(approvedDraft.status, 200);
-  assert.match(await approvedDraft.text(), /<h1>Approved<\/h1>/);
+  assert.equal((await rpc('tools/call', { name: 'get_status', arguments: { draft_id: first.draft_id } })).structuredContent.state, 'rejected');
   assert.equal((await fetch(first.approval_url.replace('/admin/approve/', '/approve/'))).status, 404);
   const status = (await rpc('tools/call', { name: 'get_status', arguments: {} })).structuredContent;
   assert.equal(status.posts_today, 0);
   assert.equal(status.pending_approval, 0);
-  assert.ok(status.recent_audit.some(a => a.action === 'approve' && a.result === 'failed: Incorrect password'));
-  console.log('Approval: forged sig=403, approve without/with wrong password=403, reject without password OK, approve with password OK, old route=404, X calls=0');
+  assert.ok(status.recent_audit.some(a => a.action === 'approval_view' && a.result === 'failed: Cloudflare Access sign-in required'));
+  console.log('Review: anonymous=403, forged sig=403, no password field, Reject OK, get_status(draft_id)=rejected, old route=404, X calls=0');
 } catch (error) {
   console.error(log);
   throw error;

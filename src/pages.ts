@@ -7,6 +7,8 @@
  * run under a random per-response nonce, never 'unsafe-inline'. Inline `style` attributes would be
  * blocked by that policy, so markup uses classes only.
  *
+ * The only external link is the published post on https://x.com, shown after a successful approval.
+ *
  * Every dynamic value goes through html() from ./security, the same escaping that redact() knows
  * about. Draft text and reply-target content come from an AI client and from X: treat them as hostile.
  */
@@ -289,7 +291,7 @@ label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 620; }
 }
 `;
 
-/** Progressive enhancement: reveals the show-password toggle. The form works without it. */
+/** Progressive enhancement for the consent page: reveals the show-password toggle. The form works without it. */
 const REVEAL_SCRIPT = `
 const input = document.getElementById("password");
 const toggle = document.getElementById("reveal");
@@ -462,12 +464,17 @@ interface MessageView {
   /** Plain text, such as an error message; escaped here. */
   detail?: string;
   headers?: Headers;
+  /** An absolute https://x.com/ link to the published post; escaped here. */
+  postHref?: string;
 }
 
 function messagePage(view: MessageView): Response {
-  const action = view.retryHref
-    ? `<div class="actions"><a class="button primary" href="${html(view.retryHref)}">Try again</a></div>`
-    : `<p class="next">${icon(view.nextIcon ?? 'back')}<span>${view.next}</span></p>`;
+  const action = view.postHref
+    ? `<div class="actions"><a class="button primary" href="${html(view.postHref)}" rel="noopener noreferrer">${icon('link')}View post on X</a></div>
+<p class="next">${icon(view.nextIcon ?? 'check')}<span>${view.next}</span></p>`
+    : view.retryHref
+      ? `<div class="actions"><a class="button primary" href="${html(view.retryHref)}">Try again</a></div>`
+      : `<p class="next">${icon(view.nextIcon ?? 'back')}<span>${view.next}</span></p>`;
   return htmlPage({
     title: view.title,
     status: view.status,
@@ -607,14 +614,14 @@ ${post}
     title: `Review ${kind}`,
     headers,
     wide: true,
-    script: `${REVEAL_SCRIPT}${EXPIRY_SCRIPT}`,
+    script: EXPIRY_SCRIPT,
     // The form posts back to this same origin and the response is never a redirect, so the existing
     // form-action restriction stays on this page (unlike /authorize).
     csp: "form-action 'self'",
     body: `<div class="hero">
 <span class="status accent" aria-hidden="true">${icon('bubble')}</span>
 <h1>Review ${kind}</h1>
-<p class="lead">Approve this ${kind} so your MCP client can publish it on X.</p>
+<p class="lead">Approve publishes this ${kind} on X right away. Reject sends it back to be rewritten.</p>
 <p class="expiry">${icon('clock')}<strong id="expires-in">${expiresIn(view.expires - view.now)}</strong><span class="sep" aria-hidden="true">·</span><time id="expires-at" datetime="${expiresAt}" title="${expiresAt}">${utc(view.expires)}</time></p>
 </div>
 ${risk}
@@ -630,10 +637,9 @@ ${target}
 <form method="post" action="/admin/approve/${html(view.id)}">
 <input type="hidden" name="sig" value="${html(view.sig)}">
 <input type="hidden" name="csrf" value="${html(view.csrf)}">
-${passwordField('The <code>AUTH_PASSWORD</code> set for this server. Not needed to reject.', false)}
 <div class="actions">
-<button class="button primary" name="decision" value="approve">Approve</button>
-<button class="button secondary" name="decision" value="reject" formnovalidate>Reject</button>
+<button class="button primary" name="decision" value="approve">${icon('send')}Approve and publish</button>
+<button class="button secondary" name="decision" value="reject">Reject</button>
 </div>
 </form>`,
   });
@@ -643,19 +649,51 @@ const CLOSE = 'You can close this page.';
 const REOPEN = 'Open the approval link from your MCP client again.';
 const NEW_DRAFT = 'Ask your MCP client for a new draft if you still want to post it.';
 
-export function approvedPage(): Response {
+/** Approved and published. `postHref` is https://x.com/<X_USERNAME>/status/<post_id>. */
+export function publishedPage(postHref: string): Response {
   return messagePage({
-    status: 200, tone: 'success', icon: 'check', title: 'Approved',
-    message: 'This draft is approved but not posted yet.',
-    next: 'Return to your MCP client to publish it.',
+    status: 200, tone: 'success', icon: 'check', title: 'Published',
+    message: 'This draft was approved and posted on X.',
+    postHref, next: CLOSE,
   });
 }
 
 export function rejectedPage(): Response {
   return messagePage({
     status: 200, tone: 'neutral', icon: 'x', title: 'Rejected',
-    message: "This draft won't be published.",
+    message: "This draft won't be published. It was sent back to your MCP client to be rewritten.",
     next: CLOSE, nextIcon: 'check',
+  });
+}
+
+/** A check failed before anything was reserved: nothing was posted and the same link can be approved again. */
+export function publishBlockedPage(reason: string, retryHref: string): Response {
+  return messagePage({
+    status: 409, tone: 'warning', icon: 'alert', title: 'Not published',
+    message: 'A check failed before sending, so nothing was posted. The draft is still waiting for review.',
+    detail: reason, retryHref, next: REOPEN,
+  });
+}
+
+/** The draft was reserved but sending failed or its outcome is unknown. Never retried automatically. */
+export function publishFailedPage(reason: string): Response {
+  return messagePage({
+    status: 502, tone: 'danger', icon: 'alert', title: 'Publishing failed',
+    message: "The draft was reserved but X didn't confirm the post. Check your X profile before posting it again; this draft can't be reused.",
+    detail: reason, next: NEW_DRAFT,
+  });
+}
+
+/** No valid Cloudflare Access session (403), or Access isn't configured or reachable (503). Nothing about the draft is shown. */
+export function accessDeniedPage(reason: string, status: 403 | 503): Response {
+  return messagePage(status === 403 ? {
+    status, tone: 'danger', icon: 'lock', title: 'Sign-in required',
+    message: 'Review links only work for reviewers signed in through Cloudflare Access. Nothing was changed.',
+    detail: reason, next: 'Sign in through Cloudflare Access, then open the approval link again.',
+  } : {
+    status, tone: 'warning', icon: 'shield', title: 'Review is unavailable',
+    message: "This server can't verify Cloudflare Access right now, so review links are disabled. Nothing was changed.",
+    detail: reason, next: 'Ask the server owner to check the Cloudflare Access settings.',
   });
 }
 
@@ -663,17 +701,13 @@ type ErrorCopy = Pick<MessageView, 'tone' | 'icon' | 'title' | 'message' | 'next
 
 /** Friendly copy for the errors GuardService.approval() throws, keyed by their exact message. */
 const APPROVAL_ERRORS: Record<string, ErrorCopy> = {
-  'Incorrect password': {
-    tone: 'danger', icon: 'lock', title: 'Incorrect password', next: REOPEN,
-    message: "That doesn't match the <code>AUTH_PASSWORD</code> set for this server, so the draft was not approved.",
-  },
   'Draft expired': {
     tone: 'warning', icon: 'clock', title: 'This draft has expired', next: NEW_DRAFT,
     message: 'Its approval window has closed, so it can no longer be approved or rejected.',
   },
   'Draft already processed; cannot approve again': {
     tone: 'neutral', icon: 'check', title: 'Already handled', next: CLOSE,
-    message: 'This draft was already approved, rejected or published, so it cannot be decided again.',
+    message: 'This draft was already rejected or published, so it cannot be decided again.',
   },
   'Invalid approval signature': {
     tone: 'danger', icon: 'link', title: 'Invalid approval link', next: 'Copy the full link from your MCP client and open it again.',
@@ -700,12 +734,11 @@ const UNKNOWN_ERROR: ErrorCopy = {
 
 /**
  * Any approval failure, as a 403 page. `message` is the (redacted) error GuardService.approval()
- * threw; known ones get friendly copy, anything else is shown as escaped detail. `retryHref` is the
- * same signed approval link, offered after a wrong password.
+ * threw; known ones get friendly copy, anything else is shown as escaped detail.
  */
-export function approvalErrorPage(message: string, retryHref?: string): Response {
+export function approvalErrorPage(message: string): Response {
   const copy = Object.hasOwn(APPROVAL_ERRORS, message) ? APPROVAL_ERRORS[message] : undefined;
-  return messagePage({ status: 403, retryHref, ...(copy ?? UNKNOWN_ERROR), detail: copy ? undefined : message });
+  return messagePage({ status: 403, ...(copy ?? UNKNOWN_ERROR), detail: copy ? undefined : message });
 }
 
 export function approvalMethodNotAllowedPage(): Response {

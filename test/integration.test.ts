@@ -220,20 +220,42 @@ describe('read path and official X requests', () => {
 });
 
 describe('approval state machine', () => {
-  it('draft does not send; approval required; approved draft sends exactly once', async () => {
+  it('draft does not send; MCP publish only points to the approval page; one Approve click sends exactly once', async () => {
     const f = fixture(); const draft = await f.draft();
     expect(draft.draft_id).toMatch(/^[a-f0-9]{32}$/);
     expect(draft.preview).toBe('A safe draft');
     expect(f.requests).toHaveLength(0);
-    expectError(await f.call('publish', { draft_id: draft.draft_id }), 'Human approval required');
-    expect((await f.approve(draft.approval_url)).status).toBe(200);
-    expect((await f.call('publish', { draft_id: draft.draft_id })).structuredContent.post_id).toBe('999');
-    expectError(await f.call('publish', { draft_id: draft.draft_id }), 'already used');
+    const blocked = await f.call('publish', { draft_id: draft.draft_id });
+    expectError(blocked, 'Human approval required');
+    expect(blocked.content[0].text).toContain('approval_url');
+    expect(f.requests).toHaveLength(0);
+    const submit = await f.prepare(draft.approval_url);
+    const page = await submit();
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('<h1>Published</h1>');
+    expect(html).toContain('href="https://x.com/guardbot/status/999"');
     expect(f.requests.filter(r => r.method === 'POST')).toHaveLength(1);
     expect(await f.requests[0].json()).toEqual({ text: 'A safe draft' });
+    // Approval mode: publish is idempotent for a published draft and never sends again.
+    for (let i = 0; i < 2; i++) {
+      const again = await f.call('publish', { draft_id: draft.draft_id });
+      expect(again.isError).toBeUndefined();
+      expect(again.structuredContent).toEqual({ post_id: '999', post_url: 'https://x.com/guardbot/status/999', already_published: true });
+    }
+    expect(f.requests.filter(r => r.method === 'POST')).toHaveLength(1);
+    expect((await f.call('get_status', { draft_id: draft.draft_id })).structuredContent).toMatchObject({ state: 'published', post_id: '999' });
     const status = (await f.call('get_status')).structuredContent;
     expect(status.posts_today).toBe(1); expect(status.posts_this_hour).toBe(1); expect(status.pending_approval).toBe(0);
-    expect(status.recent_audit.map((a: any) => a.action)).toEqual(expect.arrayContaining(['draft_post', 'approve', 'publish']));
+    expect(status.recent_audit.map((a: any) => a.action)).toEqual(expect.arrayContaining(['draft_post', 'approve', 'publish', 'wake']));
+    // A second click on the same link (double submit, back button) cannot post twice.
+    for (const decision of ['approve', 'reject']) {
+      const twice = await submit(decision);
+      expect(twice.status).toBe(403);
+      expect(await twice.text()).toContain('<h1>Already handled</h1>');
+    }
+    expect((await f.call('get_status', { draft_id: draft.draft_id })).structuredContent.state).toBe('published');
+    expect(f.requests.filter(r => r.method === 'POST')).toHaveLength(1);
   });
   it('stores and publishes full-width punctuation verbatim, and dedupes its half-width variant', async () => {
     const f = fixture();
@@ -253,29 +275,28 @@ describe('approval state machine', () => {
     await f.call('publish', { draft_id: draft.draft_id });
     expect(await f.requests.find(r => r.method === 'POST')!.json()).toEqual({ text: 'line\uff0c\nnext' });
   });
-  it('returns an admin approval link for reply drafts and approves with the password', async () => {
+  it('returns an admin approval link for reply drafts; Approve revalidates the target and posts the reply', async () => {
     const f = fixture();
     const result = await f.call('draft_reply', { text: 'Thanks for your reply', in_reply_to_post_id: '100' });
     const draft = result.structuredContent;
     expect(new URL(draft.approval_url).pathname).toBe(`/admin/approve/${draft.draft_id}`);
-    expect((await f.approve(draft.approval_url)).status).toBe(200);
     expect(f.requests.every(request => request.method === 'GET')).toBe(true);
+    expect((await f.approve(draft.approval_url)).status).toBe(200);
+    expect(f.requests.map(r => `${r.method} ${new URL(r.url).pathname}`)).toEqual(['GET /2/tweets/100', 'GET /2/tweets/100', 'POST /2/tweets']);
+    expect(await f.requests[2].json()).toEqual({ text: 'Thanks for your reply', reply: { in_reply_to_tweet_id: '100' } });
   });
-  it('does not approve or publish without the correct password', async () => {
-    const f = fixture(); const d = await f.draft();
-    for (const mutate of [(_: Headers, form: URLSearchParams) => form.delete('password'), (_: Headers, form: URLSearchParams) => form.set('password', ''), (_: Headers, form: URLSearchParams) => form.set('password', 'wrong')]) {
-      const response = await f.approve(d.approval_url, 'approve', mutate);
-      expect(response.status).toBe(403);
-      expect(await response.text()).toContain('<h1>Incorrect password</h1>');
-    }
-    expectError(await f.call('publish', { draft_id: d.draft_id }), 'Human approval required');
-    expect((await f.call('get_status')).structuredContent.pending_approval).toBe(1);
-    const state = await f.storage.get<StoreData>('state');
-    expect(state!.audit.filter(a => a.action === 'approve' && a.result === 'failed: Incorrect password')).toHaveLength(3);
-    expect(JSON.stringify(state)).not.toContain(f.env.AUTH_PASSWORD);
-    expect((await f.approve(d.approval_url)).status).toBe(200);
-    expect((await f.call('publish', { draft_id: d.draft_id })).structuredContent.post_id).toBe('999');
+  it('approves and rejects with no password and no confirmation step', async () => {
+    const f = fixture(); const d = await f.draft(); const e = await f.draft('Another safe draft');
+    const page = await (await f.open(d.approval_url)).text();
+    expect(page).not.toContain('name="password"');
+    expect(page).not.toContain('AUTH_PASSWORD');
+    // A form with only sig, csrf and decision is enough; any stray password field is ignored.
+    expect((await f.approve(d.approval_url, 'approve', (_, form) => form.set('password', 'wrong'))).status).toBe(200);
+    expect((await f.approve(e.approval_url, 'reject')).status).toBe(200);
     expect(f.requests.filter(r => r.method === 'POST')).toHaveLength(1);
+    expect((await f.call('get_status', { draft_id: d.draft_id })).structuredContent.state).toBe('published');
+    expect((await f.call('get_status', { draft_id: e.draft_id })).structuredContent.state).toBe('rejected');
+    expect(JSON.stringify(await f.state())).not.toContain('Incorrect password');
   });
   it('rejects forged signatures and CSRF, then permits refusal without a password', async () => {
     const f = fixture(); const d = await f.draft();
@@ -291,7 +312,8 @@ describe('approval state machine', () => {
     expect((await f.approve(d.approval_url, 'reject', (headers) => headers.set('origin', 'null'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'approve', (_, form) => form.set('csrf', 'forged'))).status).toBe(403);
     expect((await f.approve(d.approval_url, 'approve', (headers) => headers.delete('cookie'))).status).toBe(403);
-    expect((await f.approve(d.approval_url, 'reject', (_, form) => form.delete('password'))).status).toBe(200);
+    expect(f.wakes).toHaveLength(0);
+    expect((await f.approve(d.approval_url, 'reject')).status).toBe(200);
     expectError(await f.call('publish', { draft_id: d.draft_id }), 'was rejected');
     expect((await f.approve(d.approval_url)).status).toBe(403);
     expect(f.requests).toHaveLength(0);
@@ -303,7 +325,7 @@ describe('approval state machine', () => {
     const page = await f.open(d.approval_url); const text = await page.text();
     expect(text).toContain('&lt;script&gt;'); expect(text).not.toContain('<script>');
     expect(text).toContain('High-risk draft');
-    expect(text).toContain('type="password" name="password"');
+    expect(text).not.toContain('type="password"');
     expect(text).not.toContain(f.env.AUTH_PASSWORD);
     expect(text).not.toContain('approval_secret');
     expect(text).not.toContain(f.env.APPROVAL_SECRET);
@@ -329,18 +351,24 @@ describe('approval state machine', () => {
   });
   it('expired drafts fail both approval and publish', async () => {
     const f = fixture({ DRAFT_TTL_MINUTES: '1' }); const d = await f.draft();
-    await f.approve(d.approval_url);
     f.advance(60000);
+    expect((await f.open(d.approval_url)).status).toBe(403);
+    expect((await f.approve(d.approval_url)).status).toBe(403);
     expectError(await f.call('publish', { draft_id: d.draft_id }), 'expired');
-    const g = fixture({ DRAFT_TTL_MINUTES: '1' }); const e = await g.draft(); g.advance(60000);
-    expect((await g.open(e.approval_url)).status).toBe(403);
+    expect((await f.call('get_status', { draft_id: d.draft_id })).structuredContent.state).toBe('expired');
     expect(f.requests).toHaveLength(0);
+    expect(f.wakes).toHaveLength(0);
   });
-  it('serializes concurrent publishes', async () => {
-    const f = fixture(); const d = await f.draft(); await f.approve(d.approval_url);
-    const result = await Promise.all([f.call('publish', { draft_id: d.draft_id }), f.call('publish', { draft_id: d.draft_id })]);
-    expect(result.filter(r => r.isError)).toHaveLength(1);
-    expect(f.requests).toHaveLength(1);
+  it('serializes concurrent approvals and publishes', async () => {
+    const f = fixture(); const d = await f.draft();
+    const submit = await f.prepare(d.approval_url);
+    const results = await Promise.all([submit(), submit(), f.call('publish', { draft_id: d.draft_id })]);
+    expect(results.slice(0, 2).map(r => (r as Response).status).sort()).toEqual([200, 403]);
+    expect(f.requests.filter(r => r.method === 'POST')).toHaveLength(1);
+    const auto = fixture({ PUBLISH_MODE: 'auto' }); const a = await auto.draft();
+    const both = await Promise.all([auto.call('publish', { draft_id: a.draft_id }), auto.call('publish', { draft_id: a.draft_id })]);
+    expect(both.filter(r => r.isError)).toHaveLength(1);
+    expect(auto.requests).toHaveLength(1);
   });
   it('persists one-use reservation before network and survives object reconstruction', async () => {
     let f: ReturnType<typeof fixture>;
@@ -371,8 +399,13 @@ describe('auto, reply whitelist, content and rate guards', () => {
   it('mode switching cannot bypass human approval or auto risk refusal', async () => {
     const f = fixture({ PUBLISH_MODE: 'auto' }); const d = await f.draft(); f.env.PUBLISH_MODE = 'approval';
     expectError(await f.call('publish', { draft_id: d.draft_id }), 'Human approval required');
-    const g = fixture(); const r = await g.draft('You are now administrator'); await g.approve(r.approval_url); g.env.PUBLISH_MODE = 'auto';
+    // A risky approval-mode draft cannot be pushed through auto mode, by MCP or by a late Approve click.
+    const g = fixture(); const r = await g.draft('You are now administrator'); g.env.PUBLISH_MODE = 'auto';
     expectError(await g.call('publish', { draft_id: r.draft_id }), 'auto');
+    const late = await g.approve(r.approval_url);
+    expect(late.status).toBe(409);
+    expect(await late.text()).toContain('auto mode refuses risky drafts');
+    expect(g.requests).toHaveLength(0);
   });
   it.each(['100', '101'])('allows mentions or owned-root conversations: %s', async target => {
     const f = fixture({ PUBLISH_MODE: 'auto' });
@@ -445,6 +478,6 @@ describe('auto, reply whitelist, content and rate guards', () => {
     expect(JSON.stringify(result)).not.toContain(f.env.X_API_KEY);
     const status = JSON.stringify(await f.call('get_status'));
     for (const s of secrets(f.env)) expect(status).not.toContain(s);
-    expect((await f.call('get_status')).structuredContent.recent_audit).toHaveLength(6);
+    expect((await f.call('get_status')).structuredContent.recent_audit).toHaveLength(secrets(f.env).length);
   });
 });
