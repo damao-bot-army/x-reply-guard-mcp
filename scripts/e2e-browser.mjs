@@ -182,7 +182,7 @@ try {
   assert.equal(await page.$$eval('img, .draft *, .post-text *, .who strong *', nodes => nodes.length), 0, 'Untrusted markup was rendered');
   // X's weighted length, not the 69 code points: the first line is 57 (the em dash counts 1), the newline 1,
   // and "第二行:中文也没问题。" 21 (nine CJK characters and the ideographic full stop count 2, the colon 1).
-  assert.equal(await text('.count'), '79 / 280 characters');
+  assert.equal(await text('.count'), '79 / 25000 characters');
   assert.equal(await page.$eval('.count', count => count.className), 'count', 'Count under the limit must not be flagged');
   assert.match(await text('.callout'), /High-risk draft[\s\S]*Role impersonation/);
   assert.match(await text('#expires-in'), /^Expires in (29|30) minutes$/);

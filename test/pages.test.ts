@@ -117,8 +117,8 @@ describe('approval page', () => {
     expect(cookie).toBe(`guard_csrf=${csrf}; Path=/admin/approve/${draft.draft_id}; HttpOnly; Secure; SameSite=Strict; Max-Age=1800`);
     expect(html).toContain(`<form method="post" action="/admin/approve/${draft.draft_id}">`);
     expect(html).toContain(`<input type="hidden" name="sig" value="${sig}">`);
-    // URLs count as 23, exactly like the 280 check: "You are now admin. Read " (24) + 23 + " ok" (3).
-    expect(html).toContain(`<span class="count" title="${COUNT_TITLE}"><strong>50</strong> / 280<span class="sr-only"> characters</span></span>`);
+    // URLs count as 23, exactly like the length check: "You are now admin. Read " (24) + 23 + " ok" (3).
+    expect(html).toContain(`<span class="count" title="${COUNT_TITLE}"><strong>50</strong> / 25000<span class="sr-only"> characters</span></span>`);
     expect(html).toContain('<h1>Review post</h1>');
     expect(html).toContain('<strong id="expires-in">Expires in 30 minutes</strong>');
     expect(html).toContain('<time id="expires-at" datetime="2026-11-03T12:30:00.000Z" title="2026-11-03T12:30:00.000Z">2026-11-03 12:30 UTC</time>');
@@ -141,19 +141,19 @@ describe('approval page', () => {
     const draft = await f.draft('\u8c22\u8c22\u5206\u4eab\uff0c\u5b66\u5230\u4e86\u5f88\u591a\uff01\ud83d\udc4d\ud83c\udffd\ud83c\udde8\ud83c\uddf3 https://example.com/notes');
     expect(Array.from(draft.preview)).toHaveLength(41);
     const { html } = await expectHtmlPage(await f.open(draft.approval_url), 200, { formAction: true });
-    expect(html).toContain(`<span class="count" title="${COUNT_TITLE}"><strong>48</strong> / 280<span class="sr-only"> characters</span></span>`);
-    const full = await expectHtmlPage(await f.open((await f.draft('\u597d'.repeat(140))).approval_url), 200, { formAction: true });
-    expect(full.html).toContain('<strong>280</strong> / 280<span class="sr-only"> characters</span>');
+    expect(html).toContain(`<span class="count" title="${COUNT_TITLE}"><strong>48</strong> / 25000<span class="sr-only"> characters</span></span>`);
+    const full = await expectHtmlPage(await f.open((await f.draft('\u597d'.repeat(12500))).approval_url), 200, { formAction: true });
+    expect(full.html).toContain('<strong>25000</strong> / 25000<span class="sr-only"> characters</span>');
     expect(full.html).not.toContain('class="count over"');
   });
-  it('flags a count over 280, such as a draft stored under the old code point rule', async () => {
-    const view = { id: 'a'.repeat(32), sig: 's', csrf: 'c', text: '\u597d'.repeat(200), length: 400, riskFlags: [], expires: 1, now: 0 };
+  it('flags a count over 25000', async () => {
+    const view = { id: 'a'.repeat(32), sig: 's', csrf: 'c', text: '\u597d'.repeat(12500) + '!', length: 25001, riskFlags: [], expires: 1, now: 0 };
     const { html } = await expectHtmlPage(approvalPage(view, new Headers()), 200, { formAction: true });
-    expect(html).toContain(`<span class="count over" title="${COUNT_TITLE}"><strong>400</strong> / 280<span class="sr-only"> characters, over the limit</span></span>`);
+    expect(html).toContain(`<span class="count over" title="${COUNT_TITLE}"><strong>25001</strong> / 25000<span class="sr-only"> characters, over the limit</span></span>`);
     expect(html).toMatch(/\.count\.over \{[^}]*background: var\(--danger-soft\); color: var\(--danger\);/);
     expect(html).toContain('.count.over strong { color: var(--danger); }');
-    const atLimit = await expectHtmlPage(approvalPage({ ...view, length: 280 }, new Headers()), 200, { formAction: true });
-    expect(atLimit.html).toContain(`<span class="count" title="${COUNT_TITLE}"><strong>280</strong>`);
+    const atLimit = await expectHtmlPage(approvalPage({ ...view, length: 25000 }, new Headers()), 200, { formAction: true });
+    expect(atLimit.html).toContain(`<span class="count" title="${COUNT_TITLE}"><strong>25000</strong>`);
   });
   it('handles a reply target without stored post details', () => {
     const page = approvalPage({ id: 'a'.repeat(32), sig: 's', csrf: 'c', text: 'Hi', length: 2, riskFlags: ['made_up_<flag>'], expires: 1, now: 0, target: '5', targetInfo: { posts: 'nope' } }, new Headers());
