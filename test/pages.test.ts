@@ -124,10 +124,13 @@ describe('approval page', () => {
     expect(html).toContain('<time id="expires-at" datetime="2026-11-03T12:30:00.000Z" title="2026-11-03T12:30:00.000Z">2026-11-03 12:30 UTC</time>');
     expect(html).toContain('<strong>High-risk draft</strong>');
     expect(html).toContain('<li>Role impersonation</li>');
-    // No autofocus: on a phone the keyboard would cover the draft before it is read.
-    expect(html).toContain('<input id="password" type="password" name="password" required autocomplete="current-password"');
-    const approve = html.indexOf('<button class="button primary" name="decision" value="approve">Approve</button>');
-    const reject = html.indexOf('<button class="button secondary" name="decision" value="reject" formnovalidate>Reject</button>');
+    // No password field and no confirmation step: Cloudflare Access already identified the reviewer.
+    expect(html).not.toMatch(/<input[^>]*name="password"/);
+    expect(html).not.toContain('autofocus');
+    expect(html).toContain('Approve publishes this post on X right away. Reject sends it back to be rewritten.');
+    expect(html.match(/<input /g)).toHaveLength(2);
+    const approve = html.search(/<button class="button primary" name="decision" value="approve"><svg[^]*?<\/svg>Approve and publish<\/button>/);
+    const reject = html.indexOf('<button class="button secondary" name="decision" value="reject">Reject</button>');
     expect(approve).toBeGreaterThan(0);
     expect(reject).toBeGreaterThan(approve);
     expect((await expectHtmlPage(await f.open(draft.approval_url), 200, { formAction: true })).nonce).not.toBe(nonce);
@@ -177,8 +180,6 @@ describe('approval page', () => {
       // Run the page's own script against a minimal DOM.
       const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)![1];
       const elements: Record<string, any> = {
-        password: { type: 'password', form: { addEventListener() {} }, focus() {} },
-        reveal: { hidden: true, addEventListener() {}, setAttribute() {} },
         'expires-at': { dateTime: /datetime="([^"]+)"/.exec(html)![1], textContent: '2026-11-03 12:30 UTC' },
         'expires-in': { textContent: '' },
       };
@@ -186,30 +187,42 @@ describe('approval page', () => {
       new Function('document', script)({ getElementById: (id: string) => elements[id] });
       expect(elements['expires-in'].textContent).toBe(label);
       expect(elements['expires-at'].textContent).not.toContain('UTC');
-      expect(elements.reveal.hidden).toBe(false);
       vi.clearAllTimers();
     }
   });
 });
 
 describe('approval result and error pages', () => {
-  it('renders Approved and Rejected as 200 pages', async () => {
+  it('renders Published (with the real post link) and Rejected as 200 pages', async () => {
     const f = fixture();
-    const approved = await expectHtmlPage(await f.approve((await f.draft('First')).approval_url), 200);
-    expect(approved.html).toContain('<h1>Approved</h1>');
-    expect(approved.html).toContain('Return to your MCP client to publish it.');
-    const rejected = await expectHtmlPage(await f.approve((await f.draft('Second')).approval_url, 'reject', (_, form) => form.delete('password')), 200);
+    const published = await expectHtmlPage(await f.approve((await f.draft('First')).approval_url), 200);
+    expect(published.html).toContain('<h1>Published</h1>');
+    expect(published.html).toMatch(/<a class="button primary" href="https:\/\/x\.com\/guardbot\/status\/999" rel="noopener noreferrer"><svg[^]*?<\/svg>View post on X<\/a>/);
+    expect(published.html).not.toContain('Return to your MCP client to publish it.');
+    const rejected = await expectHtmlPage(await f.approve((await f.draft('Second')).approval_url, 'reject'), 200);
     expect(rejected.html).toContain('<h1>Rejected</h1>');
+    expect(rejected.html).toContain('sent back to your MCP client to be rewritten');
+    expect(rejected.html).not.toContain('x.com');
   });
-  it('sends a wrong password back to the same signed approval link', async () => {
-    const f = fixture(); const d = await f.draft();
-    const { html } = await expectHtmlPage(await f.approve(d.approval_url, 'approve', (_, form) => form.set('password', 'wrong')), 403);
-    expect(html).toContain('<h1>Incorrect password</h1>');
-    const path = new URL(d.approval_url).pathname + new URL(d.approval_url).search;
+  it('escapes the post link username', async () => {
+    const f = fixture({ X_USERNAME: '@guard"bot' });
+    const { html } = await (async () => { const r = await f.approve((await f.draft()).approval_url); return { html: await r.text() }; })();
+    expect(html).toContain('href="https://x.com/guard%22bot/status/999"');
+  });
+  it('offers the same signed link again when a check fails before sending', async () => {
+    const f = fixture({ MAX_POSTS_PER_HOUR: '1', DRAFT_TTL_MINUTES: '120' });
+    const first = await f.draft('First'); const second = await f.draft('Second');
+    expect((await f.approve(first.approval_url)).status).toBe(200);
+    const { html } = await expectHtmlPage(await f.approve(second.approval_url), 409);
+    expect(html).toContain('<h1>Not published</h1>');
+    expect(html).toContain('nothing was posted');
+    expect(html).toContain('<span>Details</span>Publishing rate limit exceeded; wait for the next UTC window</p>');
+    const path = new URL(second.approval_url).pathname + new URL(second.approval_url).search;
     expect(html).toContain(`<a class="button primary" href="${path.replace(/&/g, '&amp;')}">Try again</a>`);
-    // The retry link opens the review page again with a fresh CSRF token, and approval still works.
-    const retry = await f.open(`${ORIGIN}${path}`);
-    expect((await expectHtmlPage(retry, 200, { formAction: true })).html).toContain('<h1>Review post</h1>');
+    expect(html).not.toContain('<h1>Published</h1>');
+    // Still pending: once the window resets the same link publishes.
+    f.advance(3600000);
+    expect((await expectHtmlPage(await f.open(`${ORIGIN}${path}`), 200, { formAction: true })).html).toContain('<h1>Review post</h1>');
     expect((await f.approve(`${ORIGIN}${path}`)).status).toBe(200);
   });
   it('keeps every failure at 403 with a page that explains it', async () => {

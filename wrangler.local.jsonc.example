@@ -13,7 +13,12 @@
     "PUBLISH_MODE": "approval",
     "MAX_POSTS_PER_HOUR": "5",
     "MAX_POSTS_PER_DAY": "20",
-    "DRAFT_TTL_MINUTES": "30"
+    "DRAFT_TTL_MINUTES": "30",
+    // Cloudflare Access protecting /admin/approve/* (required for review pages; see README).
+    "ACCESS_TEAM_DOMAIN": "REPLACE_WITH_TEAM.cloudflareaccess.com",
+    "ACCESS_AUD": "REPLACE_WITH_ACCESS_APPLICATION_AUD_TAG",
+    // Optional: https endpoint notified when a review ends. Its token is the ECHO_WAKE_TOKEN secret.
+    "ECHO_WAKE_URL": ""
   },
   "durable_objects": {
     "bindings": [{ "name": "GUARD_STORE", "class_name": "GuardStore" }]

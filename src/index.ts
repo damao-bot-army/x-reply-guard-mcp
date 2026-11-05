@@ -5,7 +5,7 @@ import OAuthProvider, {
   insufficientScope,
 } from '@cloudflare/workers-oauth-provider';
 import type { Env } from './types';
-import { passwordMatches, secrets } from './security';
+import { passwordMatches, requiredSecrets } from './security';
 import { GuardService } from './store';
 import { authorizationFailedPage, consentPage, crossOriginPage, methodNotAllowedPage, wrongPasswordPage } from './pages';
 
@@ -18,7 +18,7 @@ export class GuardStore {
 const SCOPE = 'x';
 
 async function forward(request: Request, env: Env): Promise<Response> {
-  if (secrets(env).length !== 6) return new Response('Service credentials are incomplete', { status: 503 });
+  if (requiredSecrets(env).length !== 6) return new Response('Service credentials are incomplete', { status: 503 });
   try {
     // One globally named DO per Worker/account. Never derive the shard from client input.
     const stub = env.GUARD_STORE.get(env.GUARD_STORE.idFromName('single-account-v1'));
@@ -77,7 +77,10 @@ async function authorize(request: Request, env: Env): Promise<Response> {
   }
 }
 
-/** Everything outside /mcp. Approval pages carry their own HMAC signature, CSRF and password checks in the DO. */
+/**
+ * Everything outside /mcp. Review pages (/admin/approve/*) sit behind Cloudflare Access in production; the DO
+ * verifies the Access assertion, the HMAC link signature, expiry, Origin and CSRF before any decision.
+ */
 export async function publicHandler(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === '/health' && request.method === 'GET') return Response.json({ ok: true });

@@ -4,6 +4,9 @@ import { GuardService, type Storage } from '../src/store';
 import type { Env, Fetcher } from '../src/types';
 
 export const ORIGIN = 'https://guard.example';
+export const ACCESS_TEAM = 'guard-test.cloudflareaccess.com';
+export const ACCESS_AUD = 'test-access-aud-tag';
+export const WAKE_URL = 'https://echo.example/wake';
 export const REDIRECT_URI = 'https://client.example/callback';
 export const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
 
@@ -30,6 +33,7 @@ export function testEnv(): Env {
     X_API_KEY: 'fixture-x-consumer-private-value', X_API_SECRET: 'fixture-x-consumer-secret-value',
     X_ACCESS_TOKEN: 'fixture-x-user-private-value', X_ACCESS_TOKEN_SECRET: 'fixture-x-user-secret-value',
     X_USER_ID: '42', X_USERNAME: 'guardbot', PUBLISH_MODE: 'approval',
+    ACCESS_TEAM_DOMAIN: ACCESS_TEAM, ACCESS_AUD, ECHO_WAKE_URL: WAKE_URL, ECHO_WAKE_TOKEN: 'fixture-echo-wake-private-value',
     GUARD_STORE: {} as DurableObjectNamespace,
     OAUTH_KV: memoryKv(),
   } as Env;
@@ -67,7 +71,8 @@ export async function expectHtmlPage(response: Response, status: number, { formA
   // from elsewhere, and links only to this origin.
   for (const tag of html.match(/<[a-z][^>]*>/gi) ?? []) {
     expect(tag).not.toMatch(/\s(?:style|on[a-z]+|src|srcset|formaction)=/i);
-    expect(tag).not.toMatch(/\s(?:href|action)="(?!\/[a-z])/i);
+    // The one exception: the published post on x.com.
+    expect(tag).not.toMatch(/\s(?:href|action)="(?!\/[a-z]|https:\/\/x\.com\/guardbot\/status\/\d+")/i);
   }
   expect(html).not.toMatch(/@import|url\((?!#)/);
   return { html, nonce: nonce!, csp };
@@ -116,6 +121,31 @@ export async function oauthClient(env: Env) {
   return { client_id, consent, exchange, token };
 }
 
+// ---- Cloudflare Access test keys: a real RS256 key pair, served as the team's JWKS by the fixture fetcher. ----
+const b64url = (bytes: ArrayBuffer | Uint8Array) => base64url(bytes instanceof Uint8Array ? bytes.buffer as ArrayBuffer : bytes);
+const rsa = { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' } as const;
+let keyPairs: Promise<{ good: CryptoKeyPair; other: CryptoKeyPair; jwk: JsonWebKey }> | undefined;
+const accessKeys = () => keyPairs ??= (async () => {
+  const good = await crypto.subtle.generateKey(rsa, true, ['sign', 'verify']) as CryptoKeyPair;
+  const other = await crypto.subtle.generateKey(rsa, true, ['sign', 'verify']) as CryptoKeyPair;
+  return { good, other, jwk: await crypto.subtle.exportKey('jwk', good.publicKey) as JsonWebKey };
+})();
+export const ACCESS_CERTS_URL = `https://${ACCESS_TEAM}/cdn-cgi/access/certs`;
+export async function accessJwks(): Promise<Response> {
+  const { jwk } = await accessKeys();
+  return Response.json({ keys: [{ kid: 'test-kid', kty: 'RSA', alg: 'RS256', use: 'sig', n: jwk.n, e: jwk.e }], public_cert: { kid: 'test-kid', cert: 'unused' } });
+}
+/** A Cloudflare Access assertion signed with the test key; override claims or header, or sign with an unknown key. */
+export async function accessJwt({ claims = {}, header = {}, foreignKey = false, nowMs = Date.UTC(2026, 10, 3, 12, 0, 0) }: { claims?: Record<string, unknown>; header?: Record<string, unknown>; foreignKey?: boolean; nowMs?: number } = {}): Promise<string> {
+  const { good, other } = await accessKeys();
+  const enc = (value: unknown) => b64url(new TextEncoder().encode(JSON.stringify(value)));
+  const now = Math.floor(nowMs / 1000);
+  const head = enc({ alg: 'RS256', kid: 'test-kid', typ: 'JWT', ...header });
+  const body = enc({ iss: `https://${ACCESS_TEAM}`, aud: [ACCESS_AUD], email: 'reviewer@example.com', sub: 'reviewer', iat: now, nbf: now, exp: now + 3600, type: 'app', ...claims });
+  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', (foreignKey ? other : good).privateKey, new TextEncoder().encode(`${head}.${body}`));
+  return `${head}.${body}.${b64url(signature)}`;
+}
+
 export class MemoryStorage implements Storage {
   values = new Map<string, unknown>();
   async get<T>(key: string): Promise<T | undefined> { return structuredClone(this.values.get(key)) as T | undefined; }
@@ -130,8 +160,14 @@ export function fixture(overrides: Partial<Env> = {}, customFetch?: Fetcher) {
   const env = { ...testEnv(), ...overrides };
   const storage = new MemoryStorage();
   let now = Date.UTC(2026, 10, 3, 12, 0, 0);
+  /** Requests to X (or whatever customFetch handles). Access key fetches and wake calls are tracked separately. */
   const requests: Request[] = [];
+  const certFetches: Request[] = [];
+  const wakes: { request: Request; body: any }[] = [];
+  let wakeResponse: () => Response | Promise<Response> = () => new Response(null, { status: 204 });
   const fetcher = vi.fn(async (request: Request) => {
+    if (request.url === ACCESS_CERTS_URL) { certFetches.push(request); return accessJwks(); }
+    if (request.url === env.ECHO_WAKE_URL) { wakes.push({ request, body: await request.clone().json() }); return wakeResponse(); }
     requests.push(request);
     if (customFetch) return customFetch(request);
     const url = new URL(request.url);
@@ -163,16 +199,34 @@ export function fixture(overrides: Partial<Env> = {}, customFetch?: Fetcher) {
     return body.result;
   };
   const draft = async (text = 'A safe draft') => (await call('draft_post', { text })).structuredContent;
-  const open = async (url: string) => worker.fetch(new Request(url), env, ctx);
-  /** Opens the approval page, then submits its form with the CSRF cookie and, by default, the correct password. */
+  /** The Cloudflare Access assertion a signed-in reviewer's requests carry. */
+  const access = async () => ({ 'cf-access-jwt-assertion': await accessJwt({ nowMs: now }) });
+  /** Opens a review link as a reviewer signed in through Access (pass `access: false` for an anonymous visitor). */
+  const open = async (url: string, { access: signedIn = true, headers = {} }: { access?: boolean; headers?: Record<string, string> } = {}) =>
+    worker.fetch(new Request(url, { headers: { ...(signedIn ? await access() : {}), ...headers } }), env, ctx);
+  /** Opens the approval page as a signed-in reviewer, then submits its form (no password) with the CSRF cookie and the Access assertion. */
   const approve = async (url: string, decision = 'approve', mutate?: (headers: Headers, form: URLSearchParams) => void) => {
     const page = await open(url);
     const text = await page.text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(text)?.[1] ?? '';
-    const form = new URLSearchParams({ sig: new URL(url).searchParams.get('sig') ?? '', csrf, password: env.AUTH_PASSWORD, decision });
-    const headers = new Headers({ origin: ORIGIN, cookie: page.headers.get('set-cookie')?.split(';')[0] ?? '', 'content-type': 'application/x-www-form-urlencoded' });
+    const form = new URLSearchParams({ sig: new URL(url).searchParams.get('sig') ?? '', csrf, decision });
+    const headers = new Headers({ origin: ORIGIN, cookie: page.headers.get('set-cookie')?.split(';')[0] ?? '', 'content-type': 'application/x-www-form-urlencoded', ...await access() });
     mutate?.(headers, form);
     return worker.fetch(new Request(url.split('?')[0], { method: 'POST', headers, body: form.toString() }), env, ctx);
   };
-  return { env, storage, service, requests, fetcher, mcp, rpc, call, draft, open, approve, advance: (ms: number) => { now += ms; } };
+  /** Loads the review page once and returns a submit function bound to its CSRF token, for repeated or concurrent posts. */
+  const prepare = async (url: string) => {
+    const page = await open(url);
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await page.text())?.[1] ?? '';
+    return async (decision = 'approve') => worker.fetch(new Request(url.split('?')[0], {
+      method: 'POST', body: new URLSearchParams({ sig: new URL(url).searchParams.get('sig') ?? '', csrf, decision }).toString(),
+      headers: { origin: ORIGIN, cookie: `guard_csrf=${csrf}`, 'content-type': 'application/x-www-form-urlencoded', ...await access() },
+    }), env, ctx);
+  };
+  const state = async () => (await storage.get<import('../src/types').StoreData>('state'))!;
+  return {
+    env, storage, service, requests, certFetches, wakes, fetcher, mcp, rpc, call, draft, open, approve, prepare, access, state,
+    advance: (ms: number) => { now += ms; }, now: () => now,
+    setWakeResponse: (fn: () => Response | Promise<Response>) => { wakeResponse = fn; },
+  };
 }

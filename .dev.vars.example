@@ -1,5 +1,5 @@
 # Only placeholders. Copy to .dev.vars and fill locally; never commit .dev.vars.
-# Password the owner enters on the OAuth consent page and on the approval form.
+# Password the owner enters on the OAuth consent page (/authorize). The review page does not use it.
 AUTH_PASSWORD="replace-with-a-long-random-password"
 # Server-side HMAC signing key only. Humans never need to enter or know it.
 APPROVAL_SECRET="replace-with-a-different-random-at-least-32-bytes"
@@ -7,3 +7,8 @@ X_API_KEY="replace-api-key"
 X_API_SECRET="replace-api-secret"
 X_ACCESS_TOKEN="replace-access-token"
 X_ACCESS_TOKEN_SECRET="replace-access-token-secret"
+# Optional bearer token for ECHO_WAKE_URL (set ECHO_WAKE_URL in wrangler.local.jsonc vars).
+# ECHO_WAKE_TOKEN="replace-with-a-random-token"
+# Local development only: accept the X-Test-Access-Identity header on localhost instead of a Cloudflare Access JWT.
+# Never set this in production.
+# ACCESS_TEST_DOUBLE="true"
