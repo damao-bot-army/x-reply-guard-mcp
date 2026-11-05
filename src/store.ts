@@ -1,5 +1,5 @@
 import type { Audit, Draft, Env, Fetcher, StoreData } from './types';
-import { checkText, constantTimeEqual, digest, hmac, mode, passwordMatches, positive, postLength, randomHex, redact, untrusted } from './security';
+import { checkText, cleanText, constantTimeEqual, digest, hmac, mode, passwordMatches, positive, postLength, randomHex, redact, untrusted } from './security';
 import { PROTOCOLS, toolResult, validate } from './mcp';
 import { XClient, globalFetch, id } from './x';
 import { TOOLS } from './mcp';
@@ -76,10 +76,11 @@ export class GuardService {
         recent_audit: data.audit.slice(-20),
       };
       if (name === 'draft_post' || name === 'draft_reply') {
-        draft = { hash: await digest(String(args.text).normalize('NFKC').trim()), ...(name === 'draft_reply' ? { target: id(args.in_reply_to_post_id) } : {}) };
+        draft = { hash: await digest(cleanText(String(args.text))), ...(name === 'draft_reply' ? { target: id(args.in_reply_to_post_id) } : {}) };
         const checked = checkText(args.text as string, this.env);
         if (mode(this.env) === 'auto' && checked.risk_flags.length) throw new Error('auto mode refuses drafts containing risky content');
-        const hash = await digest(checked.text);
+        // Hash the normalized copy so full-width/half-width variants still count as duplicates; the draft keeps the original.
+        const hash = await digest(cleanText(checked.text));
         if (data.recent.includes(hash)) throw new Error('Duplicate of the last 50 published/reserved texts');
         const targetInfo = draft.target ? await this.x.allowedReply(draft.target) : undefined;
         if (Object.keys(data.drafts).length >= 1000) throw new Error('Draft storage is full (1000 maximum); wait for expired drafts to be cleaned up');
@@ -208,7 +209,7 @@ export class GuardService {
       const csrf = randomHex(32);
       // The page sets the HTML, nonce-based CSP (keeping form-action 'self') and framing headers.
       return approvalPage({
-        id: draft.id, sig, csrf, text: draft.text, length: postLength(draft.text), riskFlags: draft.risk_flags,
+        id: draft.id, sig, csrf, text: draft.text, length: postLength(cleanText(draft.text)), riskFlags: draft.risk_flags,
         expires: draft.expires, now: this.now(), target: draft.target, targetInfo: draft.targetInfo,
       }, new Headers({ 'Set-Cookie': `guard_csrf=${csrf}; Path=/admin/approve/${draft.id}; HttpOnly; Secure; SameSite=Strict; Max-Age=1800` }));
     } catch (error) {

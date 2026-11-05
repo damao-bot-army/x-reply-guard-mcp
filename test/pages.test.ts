@@ -136,7 +136,7 @@ describe('approval page', () => {
   });
   it('shows the length as X counts it, not code points', async () => {
     const f = fixture();
-    // Stored NFKC-normalized, so the full-width comma and exclamation mark become ASCII (1 each):
+    // Stored verbatim, but counted on the NFKC copy, so the full-width comma and exclamation mark count 1 each:
     // 4 * 2 + 1 + 5 * 2 + 1 + 2 (emoji with skin tone) + 2 (flag) + 1 + 23 (URL) = 48; there are 41 code points.
     const draft = await f.draft('\u8c22\u8c22\u5206\u4eab\uff0c\u5b66\u5230\u4e86\u5f88\u591a\uff01\ud83d\udc4d\ud83c\udffd\ud83c\udde8\ud83c\uddf3 https://example.com/notes');
     expect(Array.from(draft.preview)).toHaveLength(41);
