@@ -172,8 +172,8 @@ try {
   const draftText = 'Thanks for the report! <b>not bold</b> — fixed in v2.4.1.\n第二行：中文也没问题。';
   const reply = (await call('draft_reply', { text: draftText, in_reply_to_post_id: TARGET_ID })).structuredContent;
   assert.ok(reply.approval_url.startsWith(`${base}/admin/approve/`), reply.approval_url);
-  // The stored text is NFKC-normalized (the full-width colon becomes ':'); the page must show exactly that.
-  assert.match(reply.preview, /<b>not bold<\/b>[^\n]*\n第二行:/);
+  // The text is stored without NFKC (the full-width colon stays; only hidden characters are stripped); the page must show exactly that.
+  assert.equal(reply.preview, draftText);
   await expectPage(await page.goto(reply.approval_url), 200, 'Review reply');
   assert.equal(await text('.draft'), reply.preview, 'Draft text must be shown verbatim, line breaks included');
   assert.equal(await text('.post-text'), TARGET_TEXT);
@@ -181,8 +181,8 @@ try {
   assert.equal(await text('.who span'), '@mallory_dev');
   assert.equal(await page.$$eval('img, .draft *, .post-text *, .who strong *', nodes => nodes.length), 0, 'Untrusted markup was rendered');
   // X's weighted length, not the 69 code points: the first line is 57 (the em dash counts 1), the newline 1,
-  // and "第二行:中文也没问题。" 21 (nine CJK characters and the ideographic full stop count 2, the colon 1).
-  assert.equal(await text('.count'), '79 / 25000 characters');
+  // and "第二行：中文也没问题。" 22 (nine CJK characters, the full-width colon and the ideographic full stop count 2).
+  assert.equal(await text('.count'), '80 / 25000 characters');
   assert.equal(await page.$eval('.count', count => count.className), 'count', 'Count under the limit must not be flagged');
   assert.match(await text('.callout'), /High-risk draft[\s\S]*Role impersonation/);
   assert.match(await text('#expires-in'), /^Expires in (29|30) minutes$/);

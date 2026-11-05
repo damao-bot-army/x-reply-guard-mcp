@@ -1,5 +1,5 @@
 import type { Audit, Draft, Env, Fetcher, StoreData } from './types';
-import { checkText, constantTimeEqual, digest, hmac, mode, passwordMatches, positive, postLength, randomHex, redact, untrusted } from './security';
+import { checkText, cleanText, constantTimeEqual, digest, hmac, mode, passwordMatches, positive, postLength, randomHex, redact, untrusted } from './security';
 import { PROTOCOLS, toolResult, validate } from './mcp';
 import { XClient, globalFetch, id } from './x';
 import { TOOLS } from './mcp';
@@ -76,10 +76,11 @@ export class GuardService {
         recent_audit: data.audit.slice(-20),
       };
       if (name === 'draft_post' || name === 'draft_reply') {
-        draft = { hash: await digest(String(args.text).normalize('NFKC').trim()), ...(name === 'draft_reply' ? { target: id(args.in_reply_to_post_id) } : {}) };
+        const hash = await digest(cleanText(String(args.text)));
+        draft = { hash, ...(name === 'draft_reply' ? { target: id(args.in_reply_to_post_id) } : {}) };
         const checked = checkText(args.text as string, this.env);
         if (mode(this.env) === 'auto' && checked.risk_flags.length) throw new Error('auto mode refuses drafts containing risky content');
-        const hash = await digest(checked.text);
+        // The hash is of the normalized copy, so full-width/half-width variants still count as duplicates; the draft keeps the original.
         if (data.recent.includes(hash)) throw new Error('Duplicate of the last 50 published/reserved texts');
         const targetInfo = draft.target ? await this.x.allowedReply(draft.target) : undefined;
         if (Object.keys(data.drafts).length >= 1000) throw new Error('Draft storage is full (1000 maximum); wait for expired drafts to be cleaned up');
