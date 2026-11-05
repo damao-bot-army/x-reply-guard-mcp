@@ -58,7 +58,8 @@ export function redact(text: string, env: Env): string {
 }
 export function checkText(text: string, env: Env): { text: string; risk_flags: string[] } {
   const normalized = normalize(text);
-  const clean = sanitize(text, 10000).trim();
+  // No truncation here: the MCP layer caps argument size, and the length check below must see the whole text.
+  const clean = sanitize(text, Infinity).trim();
   if (!clean) throw new Error('Text must not be empty');
   const secretPattern = /sk-[a-z0-9_-]+|Bearer\s+|\b[a-f0-9]{32,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2}/iu;
   if (secrets(env).some(s => [s, normalize(s), sanitize(s, 10000), encodeURIComponent(s)].some(v => v && (text.includes(v) || normalized.includes(v) || clean.includes(v)))) || secretPattern.test(normalized) || secretPattern.test(clean)) throw new Error('Text contains a suspected secret; refused');
@@ -71,7 +72,7 @@ export function checkText(text: string, env: Env): { text: string; risk_flags: s
 // weight 100 for the ranges below. Every weight is a whole multiple of the scale, so plain 1s and 2s
 // are used here.
 /** X's limit on the weighted length of a post. */
-export const MAX_POST_LENGTH = 280;
+export const MAX_POST_LENGTH = 25000;
 /** Every URL counts as this many characters, whatever its real length (t.co wrapping). */
 export const URL_LENGTH = 23;
 /** Code points that count as 1: Latin, Greek, Cyrillic, Arabic, Indic and other scripts up to U+10FF, plus some punctuation. */
@@ -113,7 +114,7 @@ function textLength(text: string): number {
 }
 
 /**
- * The length X checks against its 280 limit (twitter-text 3.1.0 rules), computed on the NFC form of the
+ * The length X checks against its 25000 limit (X Premium) (twitter-text 3.1.0 rules), computed on the NFC form of the
  * text (checkText passes the NFKC-cleaned text that is stored and posted): each code point counts as
  * 1 in the ranges U+0000-U+10FF, U+2000-U+200D, U+2010-U+201F and U+2032-U+2037 and as 2 elsewhere (CJK, kana, Hangul, full-width forms); an emoji counts as 2,
  * including ZWJ sequences, skin tones, flags and keycaps; each URL counts as 23, found the way

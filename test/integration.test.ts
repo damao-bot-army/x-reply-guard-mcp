@@ -56,7 +56,7 @@ describe('HTTP authentication and MCP transport', () => {
   });
   it('rejects oversized bodies before parsing and inherited schema properties', async () => {
     const f = fixture();
-    expect((await f.rpc('tools/call', { name: 'draft_post', arguments: { text: '\u5b57'.repeat(12000) } })).status).toBe(413);
+    expect((await f.rpc('tools/call', { name: 'draft_post', arguments: { text: '\u5b57'.repeat(100000) } })).status).toBe(413);
     expectError(await f.call('draft_post', { text: 'Normal', constructor: 'forged' }), 'Unsupported');
     expect(f.requests).toHaveLength(0);
   });
@@ -369,7 +369,7 @@ describe('auto, reply whitelist, content and rate guards', () => {
     expectError(await f.call('draft_reply', { text: 'Not allowed', in_reply_to_post_id: target }), 'allowlisted');
     expect(f.requests.every(r => r.method === 'GET')).toBe(true);
   });
-  it.each(['', ' '.repeat(10), '\u597d'.repeat(281), 'sk-private-content', 'Bearer abc', 'a'.repeat(40), 'deadbeef'.repeat(4)])('refuses invalid draft text: %s', async text => {
+  it.each(['', ' '.repeat(10), '\u597d'.repeat(12501), 'sk-private-content', 'Bearer abc', 'a'.repeat(40), 'deadbeef'.repeat(4)])('refuses invalid draft text: %s', async text => {
     const f = fixture();
     expect((await f.call('draft_post', { text })).isError).toBe(true);
     expect(f.requests).toHaveLength(0);

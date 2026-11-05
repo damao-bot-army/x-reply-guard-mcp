@@ -139,7 +139,7 @@ export class GuardService {
     const version = request.headers.get('mcp-protocol-version');
     if (version && !PROTOCOLS.includes(version)) return json({ error: 'Unsupported MCP protocol version' }, 400);
     let body: string;
-    try { body = await readLimited(request.body, 32768); }
+    try { body = await readLimited(request.body, 262144); }
     catch (error) {
       if (error instanceof BodyLimitError) return json({ error: 'Request too large' }, 413);
       return json({ error: 'Invalid request body' }, 400);

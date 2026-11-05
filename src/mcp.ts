@@ -22,7 +22,7 @@ export function validate(name: string, args: unknown): asserts args is Record<st
   for (const [key, value] of Object.entries(a)) {
     if (key === 'max_results') {
       if (!Number.isInteger(value) || Number(value) < 5 || Number(value) > 100) throw new Error('max_results must be an integer from 5–100');
-    } else if (typeof value !== 'string' || value.length > 10000) throw new Error('Invalid or oversized string argument');
+    } else if (typeof value !== 'string' || value.length > 100000) throw new Error('Invalid or oversized string argument');
   }
 }
 export function toolResult(value: unknown, external = false): unknown {
