@@ -147,7 +147,7 @@ describe('approval page', () => {
     expect(full.html).not.toContain('class="count over"');
   });
   it('flags a count over 25000', async () => {
-    const view = { id: 'a'.repeat(32), sig: 's', csrf: 'c', text: '\u597d'.repeat(200), length: 25001, riskFlags: [], expires: 1, now: 0 };
+    const view = { id: 'a'.repeat(32), sig: 's', csrf: 'c', text: '\u597d'.repeat(12500) + '!', length: 25001, riskFlags: [], expires: 1, now: 0 };
     const { html } = await expectHtmlPage(approvalPage(view, new Headers()), 200, { formAction: true });
     expect(html).toContain(`<span class="count over" title="${COUNT_TITLE}"><strong>25001</strong> / 25000<span class="sr-only"> characters, over the limit</span></span>`);
     expect(html).toMatch(/\.count\.over \{[^}]*background: var\(--danger-soft\); color: var\(--danger\);/);

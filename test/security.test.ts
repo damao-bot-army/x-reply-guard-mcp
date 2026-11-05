@@ -160,11 +160,19 @@ describe('X weighted post length (twitter-text v3)', () => {
     const ascii = 'abc '.repeat(6249) + 'abcd';
     expect(ascii).toHaveLength(25000);
     expect(checkText(ascii, testEnv()).text).toBe(ascii);
-    expect(reject(`${ascii}!`)).toThrow(tooLong(25001));
+    expect(reject(`${ascii}!`)).toThrow('Text is 25001 UTF-16 code units long, over the 25000 limit; refused before counting');
+    expect(reject(`${'abc '.repeat(6249)}abc\u4e2d`)).toThrow(tooLong(25001));
   });
+  // Long runs that twitter-text's URL pattern rescans (CJK or letters with a '.') make counting quadratic; the
+  // UTF-16 cap must refuse them before postLength() runs, including when NFKC makes the text longer.
+  it.each([['\u4e2d.'], ['\u3316.'], ['a.'], ['\u4e2d']])('refuses a pathological %s run quickly', unit => {
+    const start = performance.now();
+    expect(reject(unit.repeat(50000))).toThrow('refused before counting');
+    expect(performance.now() - start).toBeLessThan(1000);
+  }, 2000);
   it('accepts exactly 25000 in mixed text and rejects 25001', () => {
-    // 23 + 1 + 12480 * 2 + 8 * 2 = 25000
-    const mixed = `https://example.com/path ${'\u597d'.repeat(12480)}${'\ud83d\ude00'.repeat(8)}`;
+    // 23 + 1 + 8320 * 3 + 8 * 2 = 25000 (spaces keep the CJK runs short, so URL matching stays linear)
+    const mixed = `https://example.com/path ${'\u597d '.repeat(8320)}${'\ud83d\ude00'.repeat(8)}`;
     expect(postLength(mixed)).toBe(25000);
     expect(checkText(mixed, testEnv()).text).toBe(mixed);
     expect(reject(`${mixed}!`)).toThrow(tooLong(25001));
@@ -178,12 +186,13 @@ describe('X weighted post length (twitter-text v3)', () => {
   });
   it('counts a long URL as 23 and checks the cleaned (NFKC) text', () => {
     const url = `https://example.com/${'page.'.repeat(40)}html`;
-    expect(checkText(`${'\u597d'.repeat(12488)} ${url}`, testEnv()).text).toContain(url);
-    expect(reject(`${'\u597d'.repeat(12489)} ${url}`)).toThrow(tooLong(25002));
+    // 2 + 8325 * 3 + 23 = 25000
+    expect(checkText(`\u597d${'\u597d '.repeat(8325)}${url}`, testEnv()).text).toContain(url);
+    expect(reject(`\u597d\u597d${'\u597d '.repeat(8325)}${url}`)).toThrow(tooLong(25002));
     // Full-width Latin is NFKC-normalized to ASCII before counting, so it counts 1, not 2.
     expect(checkText('\uff21'.repeat(10) + ' ' + 'abc '.repeat(6247), testEnv()).text).toMatch(/^A{10} /);
-    expect(reject('\uff21'.repeat(10) + ' ' + 'abc '.repeat(6248))).toThrow(tooLong(25002));
-  }, 30000);
+    expect(reject('\uff21'.repeat(10) + ' ' + 'abc '.repeat(6247) + '\u4e2d')).toThrow(tooLong(25001));
+  });
 });
 
 describe('URLs as twitter-text 3.1.0 finds them', () => {
@@ -227,18 +236,19 @@ describe('URLs as twitter-text 3.1.0 finds them', () => {
 
   const reject = (text: string) => () => checkText(text, testEnv());
   it('rejects text over the limit even when it follows a URL', () => {
-    expect(reject(`https://a.co/${'\u4e2d'.repeat(12500)}`)).toThrow('Text is 25023 characters');
-    expect(reject(`see https://example.com/${'\ud83d\ude00'.repeat(12500)}`)).toThrow('Text is 25027 characters');
-  }, 30000);
+    expect(reject(`https://a.co/${'\u4e2d '.repeat(8334)}`)).toThrow('Text is 25024 characters');
+    expect(reject(`see https://example.com/${'\ud83d\ude00 '.repeat(8325)}`)).toThrow('Text is 25001 characters');
+  });
   it('accepts a URL glued to Chinese text up to 25000 and rejects 25001', () => {
-    // As typed: 2 + 23 + 2 (full-width comma) + 12486 * 2 = 24999, and 12487 make 25001.
-    const prefix = '\u89c1https://example.com/a\uff0c';
-    expect(postLength(prefix + '\u4e2d'.repeat(12486))).toBe(24999);
-    expect(postLength(prefix + '\u4e2d'.repeat(12487))).toBe(25001);
-    // checkText() counts the text that is posted, where NFKC has made the comma ASCII (1): 12487 make 25000.
-    const posted = '\u89c1https://example.com/a,';
-    expect(checkText(prefix + '\u4e2d'.repeat(12487), testEnv()).text).toBe(posted + '\u4e2d'.repeat(12487));
-    expect(reject(prefix + '\u4e2d'.repeat(12488))).toThrow('Text is 25002 characters');
-    expect(reject(prefix + '\u4e2d'.repeat(12489))).toThrow('Text is 25004 characters');
-  }, 30000);
+    // As typed: 2 + 23 + 2 (full-width comma) + 2 + 8324 * 3 = 25001; spaces keep the CJK runs short.
+    const prefix = '\u89c1https://example.com/a\uff0c\u4e2d';
+    const body = ' \u4e2d'.repeat(8324);
+    expect(postLength(prefix + body)).toBe(25001);
+    expect(postLength(prefix.slice(0, -1) + body)).toBe(24999);
+    // checkText() counts the text that is posted, where NFKC has made the comma ASCII (1): 25000.
+    const posted = '\u89c1https://example.com/a,\u4e2d';
+    expect(checkText(prefix + body, testEnv()).text).toBe(posted + body);
+    expect(reject(prefix + '\u4e2d' + body)).toThrow('Text is 25002 characters');
+    expect(reject(prefix + '\u4e2d\u4e2d' + body)).toThrow('Text is 25004 characters');
+  });
 });
