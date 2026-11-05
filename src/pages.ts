@@ -567,7 +567,7 @@ export interface ApprovalView {
   csrf: string;
   /** The final draft text. Untrusted. */
   text: string;
-  /** postLength() of the text: its length as X counts it (CJK and emoji 2, URLs 23), not code points. */
+  /** postLength() of the text exactly as it will be posted: its length as X counts it (CJK and emoji 2, URLs 23), not code points. */
   length: number;
   riskFlags: string[];
   expires: number;

@@ -56,26 +56,34 @@ export function redact(text: string, env: Env): string {
   }
   return text.replace(/Bearer\s+[^\s"<>]+/giu, 'Bearer [REDACTED]').replace(/\bsk-[a-z0-9_-]+/giu, '[REDACTED]');
 }
-/** The normalized copy used only for counting, secret checks and dedupe hashing; never stored or posted. */
+/** The normalized copy used only for secret checks and dedupe hashing; never counted, stored or posted. */
 export function cleanText(text: string): string { return sanitize(text, Infinity).trim(); }
 /**
+ * Hidden characters a draft may not contain: zero-width, bidi, C0/C1 controls (newline excepted) and BOM, i.e. HIDDEN
+ * minus U+200D (ZWJ), which emoji sequences need. U+FE0F (VS16) is not in HIDDEN and is allowed too.
+ */
+export const FORBIDDEN_HIDDEN = /[\u200B\u200C\u200E\u200F\u2060-\u2064\uFEFF\u202A-\u202E\u2066-\u2069\u0000-\u0009\u000B-\u001F\u007F-\u009F]/u;
+/**
  * Validates a draft. The returned text is the input verbatim (no NFKC, no punctuation folding, no stripping):
- * that is what is stored and posted. Counting and secret checks use the normalized copy from cleanText().
+ * that is what is stored and posted, so its length is counted on that text. Drafts containing forbidden hidden
+ * characters are refused rather than silently posted. The cleaned copy is used only for secret checks.
  */
 export function checkText(text: string, env: Env): { text: string; risk_flags: string[] } {
   const normalized = normalize(text);
-  // No truncation here: the length check below must see the whole text. The MCP layer caps argument size, but the
-  // real guard is the cap on the cleaned text's UTF-16 code units before postLength() below.
   const clean = cleanText(text);
-  if (!text.trim() || !clean) throw new Error('Text must not be empty');
+  if (!clean) throw new Error('Text must not be empty');
+  const hidden = FORBIDDEN_HIDDEN.exec(text);
+  if (hidden) throw new Error(`Text contains a hidden or control character (U+${hidden[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}); refused`);
   const secretPattern = /sk-[a-z0-9_-]+|Bearer\s+|\b[a-f0-9]{32,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2}/iu;
   if (secrets(env).some(s => [s, normalize(s), sanitize(s, 10000), encodeURIComponent(s)].some(v => v && (text.includes(v) || normalized.includes(v) || clean.includes(v)))) || secretPattern.test(normalized) || secretPattern.test(clean)) throw new Error('Text contains a suspected secret; refused');
-  // Cheap guard before the count: postLength() is quadratic on some inputs (long runs such as '中.' repeated),
-  // so the cleaned text (NFKC can make it longer than the raw argument) is capped in UTF-16 code units first.
-  if (clean.length > MAX_POST_LENGTH) throw new Error(`Text is ${clean.length} UTF-16 code units long, which exceeds this server's ${MAX_POST_LENGTH.toLocaleString('en-US')} UTF-16 code unit cap (checked before counting)`);
-  const length = postLength(clean);
+  // Cheap guard before the count: postLength() is quadratic on some inputs (long runs such as '中.' repeated), so the
+  // larger of the posted text and its cleaned copy (NFKC can make it longer) is capped in UTF-16 code units first.
+  const units = Math.max(text.length, clean.length);
+  if (units > MAX_POST_LENGTH) throw new Error(`Text is ${units} UTF-16 code units long, which exceeds this server's ${MAX_POST_LENGTH.toLocaleString('en-US')} UTF-16 code unit cap (checked before counting)`);
+  const length = postLength(text);
   if (length > MAX_POST_LENGTH) throw new Error(`Text is ${length} characters as X counts them, over the ${MAX_POST_LENGTH} limit (CJK characters and emoji count as 2, each URL as ${URL_LENGTH})`);
-  return { text, risk_flags: risks(text).risk_flags };
+  // Every forbidden hidden character was refused above, so a hidden_text flag here can only come from ZWJ in emoji.
+  return { text, risk_flags: risks(text).risk_flags.filter(flag => flag !== 'hidden_text') };
 }
 
 // X's weighted length, following the twitter-text v3 configuration: scale 100, default weight 200, and
@@ -125,7 +133,7 @@ function textLength(text: string): number {
 
 /**
  * The length X checks against its 25000 limit (X Premium; twitter-text 3.1.0 rules), computed on the NFC form of the
- * text (checkText passes the NFKC-cleaned copy; the stored and posted text is the original input): each code point counts as
+ * text (checkText passes the text exactly as it will be stored and posted): each code point counts as
  * 1 in the ranges U+0000-U+10FF, U+2000-U+200D, U+2010-U+201F and U+2032-U+2037 and as 2 elsewhere (CJK, kana, Hangul, full-width forms); an emoji counts as 2,
  * including ZWJ sequences, skin tones, flags and keycaps; each URL counts as 23, found the way
  * twitter-text finds it (see post-urls.ts), so it ends before a CJK character, an emoji or trailing

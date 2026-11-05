@@ -91,8 +91,10 @@ describe('output checks and redaction', () => {
   it('rejects configured secrets and NFKC variants', () => {
     const env = testEnv(); env.X_API_KEY = 'SecretＡBC';
     expect(() => checkText('SecretABC', env)).toThrow('secret');
-    expect(() => checkText('SecretＡ\u200bBC', env)).toThrow('secret');
-    expect(() => checkText('sk-pri\u200bvate', env)).toThrow('secret');
+    // ZWJ is allowed in drafts (emoji need it) but stripped from the cleaned copy, so it cannot split a secret.
+    expect(() => checkText('SecretＡ\u200dBC', env)).toThrow('secret');
+    expect(() => checkText('sk-pri\u200dvate', env)).toThrow('secret');
+    expect(() => checkText('SecretＡ\u200bBC', env)).toThrow('hidden');
     expect(() => checkText(encodeURIComponent(env.X_API_KEY), env)).toThrow('secret');
   });
 });
@@ -178,12 +180,22 @@ describe('X weighted post length (twitter-text v3)', () => {
     expect(reject(`${mixed}!`)).toThrow(tooLong(25001));
     expect(reject(`${mixed}\ud83c\uddef\ud83c\uddf5`)).toThrow(tooLong(25002));
   });
-  it('returns the input verbatim, counting on the NFKC-cleaned copy', () => {
-    // Raw: twitter-text counts 20. The counted copy is '\u8be6\u60c5\u89c1...,\u6b22\u8fce\u8f6c\u53d1!', which counts 19.
+  it('returns the input verbatim and counts the text as it will be posted', () => {
+    // Full-width comma and exclamation mark count 2 each, as X counts them: 20.
     const input = '\u8be6\u60c5\u89c1\u2026\uff0c\u6b22\u8fce\u8f6c\u53d1\uff01';
-    const { text } = checkText(input, testEnv());
-    expect(text).toBe(input);
-    expect(postLength(cleanText(text))).toBe(19);
+    expect(checkText(input, testEnv()).text).toBe(input);
+    expect(postLength(input)).toBe(20);
+    expect(postLength('\u4f60\u597d\uff0c\u4e16\u754c\uff01\uff21')).toBe(14);
+    // NFKC would make this 24000 ASCII characters; as posted it is 36000.
+    expect(reject('\uff21 '.repeat(12000))).toThrow(tooLong(36000));
+  });
+  it.each([['U+202E', 'abc\u202Edef'], ['U+200B', 'ab\u200Bc'], ['U+200C', 'a\u200Cb'], ['BOM', '\uFEFFhi'], ['NUL', 'a\u0000b'], ['tab', 'a\tb'], ['CR', 'a\r\nb'], ['C1', 'a\u0085b'], ['U+2066', 'a\u2066b']])('refuses hidden character %s', (_name, text) => {
+    expect(reject(text)).toThrow('hidden or control character');
+  });
+  it('keeps ZWJ emoji sequences and VS16 intact', () => {
+    const family = '\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67 \ud83c\udff3\ufe0f\u200d\ud83c\udf08 \u2764\ufe0f';
+    expect(checkText(family, testEnv()).text).toBe(family);
+    expect(postLength(family)).toBe(8);
   });
   it('keeps full-width punctuation and letters exactly as typed', () => {
     const input = '  \u8c22\u8c22\uff0c\u592a\u597d\u4e86\uff01\uff21\uff22\uff23\uff1f\uff08\u6d4b\u8bd5\uff09\u3002\n';
@@ -191,14 +203,14 @@ describe('X weighted post length (twitter-text v3)', () => {
     expect(checkText('a\u200dz', testEnv()).text).toBe('a\u200dz');
     expect(() => checkText(' \u200b ', testEnv())).toThrow('empty');
   });
-  it('counts a long URL as 23 and checks the cleaned (NFKC) text', () => {
+  it('counts a long URL as 23 and full-width letters as 2', () => {
     const url = `https://example.com/${'page.'.repeat(40)}html`;
     // 2 + 8325 * 3 + 23 = 25000
     expect(checkText(`\u597d${'\u597d '.repeat(8325)}${url}`, testEnv()).text).toContain(url);
     expect(reject(`\u597d\u597d${'\u597d '.repeat(8325)}${url}`)).toThrow(tooLong(25002));
-    // Full-width Latin is NFKC-normalized to ASCII before counting, so it counts 1, not 2.
-    expect(checkText('\uff21'.repeat(10) + ' ' + 'abc '.repeat(6247), testEnv()).text).toMatch(/^\uff21{10} /);
-    expect(reject('\uff21'.repeat(10) + ' ' + 'abc '.repeat(6247) + '\u4e2d')).toThrow(tooLong(25001));
+    // Full-width Latin is not normalized: each letter counts 2, as posted.
+    expect(checkText('\uff21'.repeat(5) + ' ' + 'abc '.repeat(6247) + 'a', testEnv()).text).toMatch(/^\uff21{5} /);
+    expect(reject('\uff21'.repeat(5) + ' ' + 'abc '.repeat(6247) + 'ab')).toThrow(tooLong(25001));
   });
 });
 
@@ -243,8 +255,8 @@ describe('URLs as twitter-text 3.1.0 finds them', () => {
 
   const reject = (text: string) => () => checkText(text, testEnv());
   it('rejects text over the limit even when it follows a URL', () => {
-    expect(reject(`https://a.co/${'\u4e2d '.repeat(8334)}`)).toThrow('Text is 25024 characters');
-    expect(reject(`see https://example.com/${'\ud83d\ude00 '.repeat(8325)}`)).toThrow('Text is 25001 characters');
+    expect(reject(`https://a.co/${'\u4e2d '.repeat(8334)}`)).toThrow('Text is 25025 characters'); // the trailing space is posted, so it counts
+    expect(reject(`see https://example.com/${'\ud83d\ude00 '.repeat(8325)}`)).toThrow('Text is 25002 characters');
   });
   it('accepts a URL glued to Chinese text up to 25000 and rejects 25001', () => {
     // As typed: 2 + 23 + 2 (full-width comma) + 2 + 8324 * 3 = 25001; spaces keep the CJK runs short.
@@ -252,9 +264,9 @@ describe('URLs as twitter-text 3.1.0 finds them', () => {
     const body = ' \u4e2d'.repeat(8324);
     expect(postLength(prefix + body)).toBe(25001);
     expect(postLength(prefix.slice(0, -1) + body)).toBe(24999);
-    // checkText() counts the cleaned copy, where NFKC has made the comma ASCII (1): 25000. The text itself is kept.
-    expect(checkText(prefix + body, testEnv()).text).toBe(prefix + body);
-    expect(reject(prefix + '\u4e2d' + body)).toThrow('Text is 25002 characters');
-    expect(reject(prefix + '\u4e2d\u4e2d' + body)).toThrow('Text is 25004 characters');
+    // checkText() counts the text as posted, so the full-width comma counts 2.
+    expect(checkText(prefix.slice(0, -1) + body, testEnv()).text).toBe(prefix.slice(0, -1) + body);
+    expect(reject(prefix + body)).toThrow('Text is 25001 characters');
+    
   });
 });
