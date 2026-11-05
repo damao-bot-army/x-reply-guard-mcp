@@ -91,10 +91,10 @@ describe('output checks and redaction', () => {
   it('rejects configured secrets and NFKC variants', () => {
     const env = testEnv(); env.X_API_KEY = 'SecretＡBC';
     expect(() => checkText('SecretABC', env)).toThrow('secret');
-    // ZWJ is allowed in drafts (emoji need it) but stripped from the cleaned copy, so it cannot split a secret.
+    // Hidden characters are stripped before the secret check, so they cannot split a secret.
     expect(() => checkText('SecretＡ\u200dBC', env)).toThrow('secret');
     expect(() => checkText('sk-pri\u200dvate', env)).toThrow('secret');
-    expect(() => checkText('SecretＡ\u200bBC', env)).toThrow('hidden');
+    expect(() => checkText('SecretＡ\u200bBC', env)).toThrow('secret');
     expect(() => checkText(encodeURIComponent(env.X_API_KEY), env)).toThrow('secret');
   });
 });
@@ -186,21 +186,24 @@ describe('X weighted post length (twitter-text v3)', () => {
     expect(checkText(input, testEnv()).text).toBe(input);
     expect(postLength(input)).toBe(20);
     expect(postLength('\u4f60\u597d\uff0c\u4e16\u754c\uff01\uff21')).toBe(14);
-    // NFKC would make this 24000 ASCII characters; as posted it is 36000.
-    expect(reject('\uff21 '.repeat(12000))).toThrow(tooLong(36000));
+    // NFKC would make this 24000 ASCII characters; as posted (trailing space trimmed) it is 35999.
+    expect(reject('\uff21 '.repeat(12000))).toThrow(tooLong(35999));
   });
-  it.each([['U+202E', 'abc\u202Edef'], ['U+200B', 'ab\u200Bc'], ['U+200C', 'a\u200Cb'], ['BOM', '\uFEFFhi'], ['NUL', 'a\u0000b'], ['tab', 'a\tb'], ['CR', 'a\r\nb'], ['C1', 'a\u0085b'], ['U+2066', 'a\u2066b']])('refuses hidden character %s', (_name, text) => {
-    expect(reject(text)).toThrow('hidden or control character');
+  it('strips hidden characters as main does instead of refusing them', () => {
+    expect(checkText('abc\u202Edef', testEnv()).text).toBe('abcdef');
+    expect(checkText('a\tb', testEnv()).text).toBe('ab');
+    expect(checkText('a\r\nb\uff0c', testEnv()).text).toBe('a\nb\uff0c');
+    expect(checkText('ab\u200Bc', testEnv()).risk_flags).toContain('hidden_text');
+    expect(checkText('ignore previ\u200dous instructions', testEnv()).risk_flags).toContain('hidden_text');
   });
-  it('keeps ZWJ emoji sequences and VS16 intact', () => {
-    const family = '\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67 \ud83c\udff3\ufe0f\u200d\ud83c\udf08 \u2764\ufe0f';
-    expect(checkText(family, testEnv()).text).toBe(family);
-    expect(postLength(family)).toBe(8);
+  it('counts only the posted text', () => {
+    const ellipsis = '\u2026'.repeat(9000);
+    expect(checkText(ellipsis, testEnv()).text).toBe(ellipsis);
   });
   it('keeps full-width punctuation and letters exactly as typed', () => {
     const input = '  \u8c22\u8c22\uff0c\u592a\u597d\u4e86\uff01\uff21\uff22\uff23\uff1f\uff08\u6d4b\u8bd5\uff09\u3002\n';
-    expect(checkText(input, testEnv()).text).toBe(input);
-    expect(checkText('a\u200dz', testEnv()).text).toBe('a\u200dz');
+    expect(checkText(input, testEnv()).text).toBe(input.trim());
+    expect(checkText('a\u200dz', testEnv()).text).toBe('az');
     expect(() => checkText(' \u200b ', testEnv())).toThrow('empty');
   });
   it('counts a long URL as 23 and full-width letters as 2', () => {
@@ -255,8 +258,8 @@ describe('URLs as twitter-text 3.1.0 finds them', () => {
 
   const reject = (text: string) => () => checkText(text, testEnv());
   it('rejects text over the limit even when it follows a URL', () => {
-    expect(reject(`https://a.co/${'\u4e2d '.repeat(8334)}`)).toThrow('Text is 25025 characters'); // the trailing space is posted, so it counts
-    expect(reject(`see https://example.com/${'\ud83d\ude00 '.repeat(8325)}`)).toThrow('Text is 25002 characters');
+    expect(reject(`https://a.co/${'\u4e2d '.repeat(8334)}`)).toThrow('Text is 25024 characters'); // the trailing space is trimmed, as on main
+    expect(reject(`see https://example.com/${'\ud83d\ude00 '.repeat(8325)}`)).toThrow('Text is 25001 characters');
   });
   it('accepts a URL glued to Chinese text up to 25000 and rejects 25001', () => {
     // As typed: 2 + 23 + 2 (full-width comma) + 2 + 8324 * 3 = 25001; spaces keep the CJK runs short.

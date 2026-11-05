@@ -172,7 +172,7 @@ try {
   const draftText = 'Thanks for the report! <b>not bold</b> — fixed in v2.4.1.\n第二行：中文也没问题。';
   const reply = (await call('draft_reply', { text: draftText, in_reply_to_post_id: TARGET_ID })).structuredContent;
   assert.ok(reply.approval_url.startsWith(`${base}/admin/approve/`), reply.approval_url);
-  // The text is stored verbatim (no NFKC: the full-width colon stays); the page must show exactly that.
+  // The text is stored without NFKC (the full-width colon stays; only hidden characters are stripped); the page must show exactly that.
   assert.equal(reply.preview, draftText);
   await expectPage(await page.goto(reply.approval_url), 200, 'Review reply');
   assert.equal(await text('.draft'), reply.preview, 'Draft text must be shown verbatim, line breaks included');
