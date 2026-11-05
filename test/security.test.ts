@@ -160,14 +160,14 @@ describe('X weighted post length (twitter-text v3)', () => {
     const ascii = 'abc '.repeat(6249) + 'abcd';
     expect(ascii).toHaveLength(25000);
     expect(checkText(ascii, testEnv()).text).toBe(ascii);
-    expect(reject(`${ascii}!`)).toThrow('Text is 25001 UTF-16 code units long, over the 25000 limit; refused before counting');
+    expect(reject(`${ascii}!`)).toThrow('Text is 25001 UTF-16 code units long, which exceeds this server\'s 25,000 UTF-16 code unit cap (checked before counting)');
     expect(reject(`${'abc '.repeat(6249)}abc\u4e2d`)).toThrow(tooLong(25001));
   });
   // Long runs that twitter-text's URL pattern rescans (CJK or letters with a '.') make counting quadratic; the
   // UTF-16 cap must refuse them before postLength() runs, including when NFKC makes the text longer.
   it.each([['\u4e2d.'], ['\u3316.'], ['a.'], ['\u4e2d']])('refuses a pathological %s run quickly', unit => {
     const start = performance.now();
-    expect(reject(unit.repeat(50000))).toThrow('refused before counting');
+    expect(reject(unit.repeat(50000))).toThrow('checked before counting');
     expect(performance.now() - start).toBeLessThan(1000);
   }, 2000);
   it('accepts exactly 25000 in mixed text and rejects 25001', () => {

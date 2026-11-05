@@ -601,8 +601,6 @@ ${post}
 </article>
 </section>`;
   }
-  // Drafts over the limit cannot be created, but one made under an older counting rule can still be
-  // pending; publish() would refuse it, so the count says so.
   const over = view.length > MAX_POST_LENGTH;
   const count = `<span class="count${over ? ' over' : ''}" title="Counted the way X counts: CJK characters and emoji count as 2, each URL as ${URL_LENGTH}"><strong>${view.length}</strong> / ${MAX_POST_LENGTH}<span class="sr-only"> characters${over ? ', over the limit' : ''}</span></span>`;
   return htmlPage({

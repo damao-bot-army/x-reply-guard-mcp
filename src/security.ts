@@ -58,14 +58,15 @@ export function redact(text: string, env: Env): string {
 }
 export function checkText(text: string, env: Env): { text: string; risk_flags: string[] } {
   const normalized = normalize(text);
-  // No truncation here: the MCP layer caps argument size, and the length check below must see the whole text.
+  // No truncation here: the length check below must see the whole text. The MCP layer caps argument size, but the
+  // real guard is the cap on the cleaned text's UTF-16 code units before postLength() below.
   const clean = sanitize(text, Infinity).trim();
   if (!clean) throw new Error('Text must not be empty');
   const secretPattern = /sk-[a-z0-9_-]+|Bearer\s+|\b[a-f0-9]{32,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2}/iu;
   if (secrets(env).some(s => [s, normalize(s), sanitize(s, 10000), encodeURIComponent(s)].some(v => v && (text.includes(v) || normalized.includes(v) || clean.includes(v)))) || secretPattern.test(normalized) || secretPattern.test(clean)) throw new Error('Text contains a suspected secret; refused');
   // Cheap guard before the count: postLength() is quadratic on some inputs (long runs such as '中.' repeated),
   // so the cleaned text (NFKC can make it longer than the raw argument) is capped in UTF-16 code units first.
-  if (clean.length > MAX_POST_LENGTH) throw new Error(`Text is ${clean.length} UTF-16 code units long, over the ${MAX_POST_LENGTH} limit; refused before counting`);
+  if (clean.length > MAX_POST_LENGTH) throw new Error(`Text is ${clean.length} UTF-16 code units long, which exceeds this server's ${MAX_POST_LENGTH.toLocaleString('en-US')} UTF-16 code unit cap (checked before counting)`);
   const length = postLength(clean);
   if (length > MAX_POST_LENGTH) throw new Error(`Text is ${length} characters as X counts them, over the ${MAX_POST_LENGTH} limit (CJK characters and emoji count as 2, each URL as ${URL_LENGTH})`);
   return { text: clean, risk_flags: risks(text).risk_flags };
